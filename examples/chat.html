@@ -12,13 +12,27 @@
 </head>
 
 <body>
-    <button id="rtc" onClick="startRtc()">Connect</button>
-    <button id="cam" onClick="startCam()" disabled>Cam</button>
-    <button id="mic" onClick="startMic()" disabled>Mic</button>
+    <form method="post" target="#">
+        <input id="name" label="name" type="text" placeholder="Name" autocomplete="off">
+        <button id="rtc" type="submit" for="name" onClick="startRtc()" disabled>Connect</button>
+        <button id="cam" onClick="startCam()" disabled>Cam</button>
+        <button id="mic" onClick="startMic()" disabled>Mic</button>
+    </form>
     ICE: <span id="ice_status">new</span>
     <div id="chan_status">Waiting for data channel.</div>
     <div id="media"></div>
     <script>
+        const rtcButtonEl = document.querySelector('#rtc');
+        const nameInputEl = document.querySelector('#name');
+        nameInputEl.focus();
+        nameInputEl.addEventListener('input', (e) => {
+            if (e.target.value == '') {
+                rtcButtonEl.disabled = true;
+            } else {
+                rtcButtonEl.disabled = false;
+            }
+        });        
+
         let streamCam;
         let streamMic;
         let dataChannel;
@@ -33,7 +47,7 @@
                     streamMic.getTracks()[0]?.stop();
                 }
                 rtc.close();
-                byId('rtc').disabled = true;
+                rtcButtonEl.disabled = true;
                 byId('cam').disabled = true;
                 byId('mic').disabled = true;
             }
@@ -66,8 +80,8 @@
             byId('cam').disabled = true;
             streamCam = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: 640,
-                    height: 360,
+                    width: 1280,
+                    height: 720,
                 },
             });
             const tr = rtc.addTransceiver(streamCam.getTracks()[0], {
@@ -91,10 +105,11 @@
 
                 // Uncomment this to enable simulcast. The actual selected
                 // simulcast level is hardcoded in chat.rs.
-                // sendEncodings: [
-                //     { rid: "h", maxBitrate: 700 * 1024 },
-                //     { rid: "l", maxBitrate: 150 * 1024 }
-                // ]
+                sendEncodings: [
+                    { rid: "h", active: true, maxBitrate: 900000 },
+                    { rid: "m", active: true, maxBitrate: 300000, scaleResolutionDownBy: 2 },
+                    { rid: "l", active: true, maxBitrate: 100000, scaleResolutionDownBy: 4 }
+                ]
             });
             await negotiate();
         }
@@ -119,7 +134,7 @@
                 return;
             }
             el.id = domId;
-            el.width = 500;
+            // el.width = 500;
             byId('media').appendChild(el);
             el.controls = true;
             el.autoplay = true;
@@ -138,7 +153,8 @@
             });
         };
         async function startRtc() {
-            byId('rtc').disabled = true;
+            nameInputEl.disabled = true;
+            rtcButtonEl.disabled = true;
             dataChannel = rtc.createDataChannel("offer/answer");
             dataChannel.onmessage = (event) => {
                 let json = JSON.parse(event.data);
@@ -159,7 +175,7 @@
             rtc.setLocalDescription(offer);
             console.log('POST offer', offer.sdp.split('\r\n'));
 
-            const res = await fetch('/start', {
+            const res = await fetch(`/start?name=${nameInputEl.value}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'

@@ -70,10 +70,12 @@ pub fn main() {
 }
 
 // Handle a web request.
-fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Response {
+fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<(Rtc, Option<String>)>) -> Response {
     if request.method() == "GET" {
         return Response::html(include_str!("chat.html"));
     }
+
+    let name = request.get_param("name");
 
     // Expected POST SDP Offers.
     let mut data = request.data().expect("body to be available");
@@ -96,7 +98,7 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
         .expect("offer to be accepted");
 
     // The Rtc instance is shipped off to the main run loop.
-    tx.send(rtc).expect("to send Rtc instance");
+    tx.send((rtc, name)).expect("to send Rtc instance");
 
     let body = serde_json::to_vec(&answer).expect("answer to serialize");
 
@@ -105,7 +107,7 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
 
 /// This is the "main run loop" that handles all clients, reads and writes UdpSocket traffic,
 /// and forwards media data between clients.
-fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
+fn run(socket: UdpSocket, rx: Receiver<(Rtc, Option<String>)>) -> Result<(), RtcError> {
     let mut clients: Vec<Client> = vec![];
     let mut buf = vec![0; 2000];
 
@@ -173,10 +175,10 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
 }
 
 /// Receive new clients from the receiver and create new Client instances.
-fn spawn_new_client(rx: &Receiver<Rtc>) -> Option<Client> {
+fn spawn_new_client(rx: &Receiver<(Rtc, Option<String>)>) -> Option<Client> {
     // try_recv here won't lock up the thread.
     match rx.try_recv() {
-        Ok(rtc) => Some(Client::new(rtc)),
+        Ok((rtc, name)) => Some(Client::new(rtc, name)),
         Err(TryRecvError::Empty) => None,
         _ => panic!("Receiver<Rtc> disconnected"),
     }
@@ -294,7 +296,14 @@ impl TrackOut {
 }
 
 impl Client {
-    fn new(rtc: Rtc) -> Client {
+    fn new(rtc: Rtc, name: Option<String>) -> Client {
+        let rids: [Rid; 3] = ["h".into(), "m".into(), "l".into()];
+        let chosen_rid = name.and_then(|name| {
+            rids.iter().find_map(|rid| {
+                (rid == &name.as_str().into()).then_some(rid.clone())
+            })
+        });
+
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Client {
@@ -304,7 +313,7 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
-            chosen_rid: None,
+            chosen_rid
         }
     }
 
@@ -536,7 +545,7 @@ impl Client {
             return;
         };
 
-        if data.rid.is_some() && data.rid != Some("h".into()) {
+        if data.rid.is_some() && data.rid != self.chosen_rid.or(Some("h".into())) {
             // This is where we plug in a selection strategy for simulcast. For
             // now either let rid=None through (which would be no simulcast layers)
             // or "h" if we have simulcast (see commented out code in chat.html).
