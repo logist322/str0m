@@ -1,5 +1,6 @@
 use super::{BitRead, CodecExtra, Depacketizer, MediaKind, PacketError, Packetizer};
 
+use std::collections::HashMap;
 use std::fmt;
 use std::panic::RefUnwindSafe;
 use std::panic::UnwindSafe;
@@ -12,6 +13,96 @@ const MAX_VP9REF_PICS: usize = 3;
 
 /// InitialPictureIDFn is a function that returns random initial picture ID.
 pub type InitialPictureIDFn = Arc<dyn (Fn() -> u16) + Send + Sync + UnwindSafe + RefUnwindSafe>;
+
+/// asdd
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vp9CodecExtra {
+    /// pas
+    pub layer_map: Vec<(LayerInfo, (usize, usize))>,
+
+    /// Quantity of spatial layers.
+    pub spatial_quantity: u8,
+}
+
+/// puk hruk
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerInfo {
+    /// asdd
+    S0T0,
+
+    /// asdsd
+    S0T1,
+
+    /// asddwq
+    S0T2,
+
+    /// asddwq
+    S1T0,
+
+    /// asddwq
+    S1T1,
+
+    /// asddwq
+    S1T2,
+
+    /// asddwq
+    S2T0,
+
+    /// asddwq
+    S2T1,
+
+    /// asddwq
+    S2T2,
+}
+
+impl LayerInfo {
+    /// Spatial
+    pub fn spatial(&self) -> u8 {
+        match self {
+            LayerInfo::S0T0
+            | LayerInfo::S0T1
+            | LayerInfo::S0T2 => 0,
+            LayerInfo::S1T0
+            | LayerInfo::S1T1
+            | LayerInfo::S1T2 => 1,
+            LayerInfo::S2T0
+            | LayerInfo::S2T1
+            | LayerInfo::S2T2 => 2,
+        }
+    }
+
+    /// Temporal
+    pub fn temporal(&self) -> u8 {
+        match self {
+            LayerInfo::S0T0
+            | LayerInfo::S1T0
+            | LayerInfo::S2T0 => 0,
+            LayerInfo::S0T1
+            | LayerInfo::S1T1
+            | LayerInfo::S2T1 => 1,
+            LayerInfo::S0T2
+            | LayerInfo::S1T2
+            | LayerInfo::S2T2 => 2,
+        }
+    }
+}
+
+impl From<(u8, u8)> for LayerInfo {
+    fn from(value: (u8, u8)) -> Self {
+        match value {
+            (0, 0) => Self::S0T0,
+            (0, 1) => Self::S0T1,
+            (0, 2) => Self::S0T2,
+            (1, 0) => Self::S1T0,
+            (1, 1) => Self::S1T1,
+            (1, 2) => Self::S1T2,
+            (2, 0) => Self::S2T0,
+            (2, 1) => Self::S2T1,
+            (2, 2) => Self::S2T2,
+            _ => unreachable!(),
+        }
+    }
+}
 
 /// Packetizes VP9 RTP packets.
 #[derive(Default, Clone)]
@@ -200,7 +291,7 @@ impl Depacketizer for Vp9Depacketizer {
         &mut self,
         packet: &[u8],
         out: &mut Vec<u8>,
-        _: &mut CodecExtra,
+        extra: &mut CodecExtra,
     ) -> Result<(), PacketError> {
         if packet.is_empty() {
             return Err(PacketError::ErrShortPacket);
@@ -234,6 +325,21 @@ impl Depacketizer for Vp9Depacketizer {
 
         if self.v {
             payload_index = self.parse_ssdata(&mut reader, payload_index)?;
+        }
+
+        if let CodecExtra::Vp9(e) = extra {
+            _ = e.layer_map.push((
+                LayerInfo::from((self.sid, self.tid)),
+                (out.len(), out.len() + packet.len() - payload_index),
+            ));
+        } else {
+            *extra = CodecExtra::Vp9(Vp9CodecExtra {
+                spatial_quantity: self.ns,
+                layer_map: Vec::from([(
+                    LayerInfo::from((self.sid, self.tid)),
+                    (out.len(), out.len() + packet.len() - payload_index),
+                )]),
+            });
         }
 
         out.extend_from_slice(&packet[payload_index..]);
