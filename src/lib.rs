@@ -228,7 +228,7 @@
 //! let writer = rtc.writer(mid).unwrap();
 //!
 //! // Get the payload type (pt) for the wanted codec.
-//! let pt = writer.payload_params()[0].pt();
+//! let pt = writer.payload_params().nth(0).unwrap().pt();
 //!
 //! // Write the data
 //! let wallclock = todo!();   // Absolute time of the data
@@ -580,7 +580,7 @@
 #[macro_use]
 extern crate tracing;
 
-use bwe::Bwe;
+use bwe::{Bwe, BweKind};
 use change::{DirectApi, SdpApi};
 use rtp::RawPacket;
 use std::fmt;
@@ -906,7 +906,7 @@ pub enum Event {
     MediaEgressStats(MediaEgressStats),
 
     /// A new estimate from the bandwidth estimation subsystem.
-    EgressBitrateEstimate(Bitrate),
+    EgressBitrateEstimate(BweKind),
 
     // =================== RTP related events ===================
 
@@ -1635,7 +1635,7 @@ impl Rtc {
         n
     }
 
-    /// The codec configs for sending/receiving data..
+    /// The codec configs for sending/receiving data.
     ///
     /// The configurations can be set with [`RtcConfig`] before setting up the session, and they
     /// might be further updated by SDP negotiation.
@@ -1786,7 +1786,7 @@ impl RtcConfig {
         self.ice_lite
     }
 
-    /// Lower level access to precis configuration of codecs (payload types).
+    /// Lower level access to precise configuration of codecs (payload types).
     pub fn codec_config(&mut self) -> &mut CodecConfig {
         &mut self.codec_config
     }

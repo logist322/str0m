@@ -1,5 +1,15 @@
 # Unreleased
+  * Header extension abs_send_time is now an Instant
+  * Handle more optional a=candidate parameters
+  * Support REMB (receiver estimated maximum bitrate) feedback packets (breaking)
 
+# 0.4.1
+  * Generated DTLS certificates set issuer/subject for compat with OBS/libdatachannel
+
+# 0.4.0
+  * Allow SDP RID with `~` prefix (to indicate paused state)
+  * Fix problem with using RTX for audio
+  * Make IceCandidate serializable to SDP form (to/from_sdp_string)
   * UserExtensionValues set_arc/get_arc to avoid cloning
   * Provide correct Rid for repaired RTP headers
   * Support 2-byte header extensions
