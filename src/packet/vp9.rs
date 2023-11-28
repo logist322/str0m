@@ -14,80 +14,77 @@ const MAX_VP9REF_PICS: usize = 3;
 /// InitialPictureIDFn is a function that returns random initial picture ID.
 pub type InitialPictureIDFn = Arc<dyn (Fn() -> u16) + Send + Sync + UnwindSafe + RefUnwindSafe>;
 
-/// asdd
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Vp9 information describing the depacketized/packetized data.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Vp9CodecExtra {
-    /// pas
-    pub layer_map: Vec<(LayerInfo, (usize, usize))>,
-
-    /// Quantity of spatial layers.
-    pub spatial_quantity: u8,
+    /// Map of the SVC layers.
+    pub layer_scheme: [Option<(usize, usize)>; 9],
 }
 
-/// puk hruk
+/// Layer (combination on spatial and temporal layers) of VP9 SVC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LayerInfo {
-    /// asdd
+pub enum Layer {
+    /// Spatial 0, temporal 0.
     S0T0,
 
-    /// asdsd
+    /// Spatial 0, temporal 1.
     S0T1,
 
-    /// asddwq
+    /// Spatial 0, temporal 2.
     S0T2,
 
-    /// asddwq
+    /// Spatial 1, temporal 0.
     S1T0,
 
-    /// asddwq
+    /// Spatial 1, temporal 1.
     S1T1,
 
-    /// asddwq
+    /// Spatial 1, temporal 2.
     S1T2,
 
-    /// asddwq
+    /// Spatial 2, temporal 0.
     S2T0,
 
-    /// asddwq
+    /// Spatial 2, temporal 1.
     S2T1,
 
-    /// asddwq
+    /// Spatial 2, temporal 2.
     S2T2,
 }
 
-impl LayerInfo {
-    /// Spatial
+impl Layer {
+    /// Spatial layer.
     pub fn spatial(&self) -> u8 {
         match self {
-            LayerInfo::S0T0
-            | LayerInfo::S0T1
-            | LayerInfo::S0T2 => 0,
-            LayerInfo::S1T0
-            | LayerInfo::S1T1
-            | LayerInfo::S1T2 => 1,
-            LayerInfo::S2T0
-            | LayerInfo::S2T1
-            | LayerInfo::S2T2 => 2,
+            Layer::S0T0
+            | Layer::S0T1
+            | Layer::S0T2 => 0,
+            Layer::S1T0
+            | Layer::S1T1
+            | Layer::S1T2 => 1,
+            Layer::S2T0
+            | Layer::S2T1
+            | Layer::S2T2 => 2,
         }
     }
 
-    /// Temporal
+    /// Temporal layer.
     pub fn temporal(&self) -> u8 {
         match self {
-            LayerInfo::S0T0
-            | LayerInfo::S1T0
-            | LayerInfo::S2T0 => 0,
-            LayerInfo::S0T1
-            | LayerInfo::S1T1
-            | LayerInfo::S2T1 => 1,
-            LayerInfo::S0T2
-            | LayerInfo::S1T2
-            | LayerInfo::S2T2 => 2,
+            Layer::S0T0
+            | Layer::S1T0
+            | Layer::S2T0 => 0,
+            Layer::S0T1
+            | Layer::S1T1
+            | Layer::S2T1 => 1,
+            Layer::S0T2
+            | Layer::S1T2
+            | Layer::S2T2 => 2,
         }
     }
 }
 
-impl From<(u8, u8)> for LayerInfo {
+impl From<(u8, u8)> for Layer {
     fn from(value: (u8, u8)) -> Self {
         match value {
             (0, 0) => Self::S0T0,
@@ -99,6 +96,23 @@ impl From<(u8, u8)> for LayerInfo {
             (2, 0) => Self::S2T0,
             (2, 1) => Self::S2T1,
             (2, 2) => Self::S2T2,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<usize> for Layer {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => Self::S0T0,
+            1 => Self::S0T1,
+            2 => Self::S0T2,
+            3 => Self::S1T0,
+            4 => Self::S1T1,
+            5 => Self::S1T2,
+            6 => Self::S2T0,
+            7 => Self::S2T1,
+            8 => Self::S2T2,
             _ => unreachable!(),
         }
     }
@@ -327,19 +341,23 @@ impl Depacketizer for Vp9Depacketizer {
             payload_index = self.parse_ssdata(&mut reader, payload_index)?;
         }
 
+        let layer = Layer::from((self.sid, self.tid));
+        let mut range = (out.len(), out.len() + packet.len() - payload_index);
+
         if let CodecExtra::Vp9(e) = extra {
-            _ = e.layer_map.push((
-                LayerInfo::from((self.sid, self.tid)),
-                (out.len(), out.len() + packet.len() - payload_index),
-            ));
+            if let Some((start, stop)) = e.layer_scheme[layer as usize] {
+                if stop == range.0 {
+                    e.layer_scheme[layer as usize] = Some((start, range.1))
+                } else {
+                    unreachable!()
+                }
+            } else {
+                e.layer_scheme[layer as usize] = Some(range);
+            }
         } else {
-            *extra = CodecExtra::Vp9(Vp9CodecExtra {
-                spatial_quantity: self.ns,
-                layer_map: Vec::from([(
-                    LayerInfo::from((self.sid, self.tid)),
-                    (out.len(), out.len() + packet.len() - payload_index),
-                )]),
-            });
+            let mut vp9_extra = Vp9CodecExtra::default();
+            vp9_extra.layer_scheme[layer as usize] = Some(range);
+            *extra = CodecExtra::Vp9(vp9_extra);
         }
 
         out.extend_from_slice(&packet[payload_index..]);

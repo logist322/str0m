@@ -208,7 +208,7 @@ impl DepacketizingBuffer {
             return None;
         }
 
-        self.last_emitted = Some((last, dep.codec_extra.clone()));
+        self.last_emitted = Some((last, dep.codec_extra));
 
         Some(Ok(dep))
     }

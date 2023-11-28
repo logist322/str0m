@@ -28,7 +28,7 @@ pub use vp8::Vp8CodecExtra;
 use vp8::{Vp8Depacketizer, Vp8Packetizer};
 
 mod vp9;
-pub use vp9::{Vp9CodecExtra, LayerInfo};
+pub use vp9::{Vp9CodecExtra, Layer};
 use vp9::{Vp9Depacketizer, Vp9Packetizer};
 
 mod null;
@@ -81,7 +81,7 @@ pub(crate) trait Packetizer: fmt::Debug {
 ///
 /// Contains additional codec specific information which are deemed useful for
 /// managing and repackaging the sample
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecExtra {
     /// No extra information available
     None,

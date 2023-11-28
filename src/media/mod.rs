@@ -254,7 +254,7 @@ impl Media {
                         seq_range: dep.seq_range(),
                         contiguous: dep.contiguous,
                         ext_vals: dep.ext_vals().clone(),
-                        codec_extra: dep.codec_extra.clone(),
+                        codec_extra: dep.codec_extra,
                         last_sender_info: dep.first_sender_info(),
                         data: dep.data,
                     })
