@@ -18,7 +18,19 @@ pub type InitialPictureIDFn = Arc<dyn (Fn() -> u16) + Send + Sync + UnwindSafe +
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Vp9CodecExtra {
     /// Map of the SVC layers.
+    /// 
+    /// Position of chunks of [`Layer`]s.
     pub layer_scheme: [Option<(usize, usize)>; 9],
+    
+    /// Map of the SVC layers widths.
+    /// 
+    /// Specified for every spatial layer.
+    pub layer_widths: [Option<u16>; 3],
+    
+    /// Map of the SVC layers heights.
+    /// 
+    /// Specified for every spatial layer.
+    pub layer_heights: [Option<u16>; 3],
 }
 
 /// Layer (combination on spatial and temporal layers) of VP9 SVC.
@@ -56,64 +68,56 @@ impl Layer {
     /// Spatial layer.
     pub fn spatial(&self) -> u8 {
         match self {
-            Layer::S0T0
-            | Layer::S0T1
-            | Layer::S0T2 => 0,
-            Layer::S1T0
-            | Layer::S1T1
-            | Layer::S1T2 => 1,
-            Layer::S2T0
-            | Layer::S2T1
-            | Layer::S2T2 => 2,
+            Layer::S0T0 | Layer::S0T1 | Layer::S0T2 => 0,
+            Layer::S1T0 | Layer::S1T1 | Layer::S1T2 => 1,
+            Layer::S2T0 | Layer::S2T1 | Layer::S2T2 => 2,
         }
     }
 
     /// Temporal layer.
     pub fn temporal(&self) -> u8 {
         match self {
-            Layer::S0T0
-            | Layer::S1T0
-            | Layer::S2T0 => 0,
-            Layer::S0T1
-            | Layer::S1T1
-            | Layer::S2T1 => 1,
-            Layer::S0T2
-            | Layer::S1T2
-            | Layer::S2T2 => 2,
+            Layer::S0T0 | Layer::S1T0 | Layer::S2T0 => 0,
+            Layer::S0T1 | Layer::S1T1 | Layer::S2T1 => 1,
+            Layer::S0T2 | Layer::S1T2 | Layer::S2T2 => 2,
         }
     }
 }
 
-impl From<(u8, u8)> for Layer {
-    fn from(value: (u8, u8)) -> Self {
+impl TryFrom<(u8, u8)> for Layer {
+    type Error = ();
+
+    fn try_from(value: (u8, u8)) -> Result<Self, Self::Error> {
         match value {
-            (0, 0) => Self::S0T0,
-            (0, 1) => Self::S0T1,
-            (0, 2) => Self::S0T2,
-            (1, 0) => Self::S1T0,
-            (1, 1) => Self::S1T1,
-            (1, 2) => Self::S1T2,
-            (2, 0) => Self::S2T0,
-            (2, 1) => Self::S2T1,
-            (2, 2) => Self::S2T2,
-            _ => unreachable!(),
+            (0, 0) => Ok(Self::S0T0),
+            (0, 1) => Ok(Self::S0T1),
+            (0, 2) => Ok(Self::S0T2),
+            (1, 0) => Ok(Self::S1T0),
+            (1, 1) => Ok(Self::S1T1),
+            (1, 2) => Ok(Self::S1T2),
+            (2, 0) => Ok(Self::S2T0),
+            (2, 1) => Ok(Self::S2T1),
+            (2, 2) => Ok(Self::S2T2),
+            _ => Err(()),
         }
     }
 }
 
-impl From<usize> for Layer {
-    fn from(value: usize) -> Self {
+impl TryFrom<usize> for Layer {
+    type Error = ();
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
         match value {
-            0 => Self::S0T0,
-            1 => Self::S0T1,
-            2 => Self::S0T2,
-            3 => Self::S1T0,
-            4 => Self::S1T1,
-            5 => Self::S1T2,
-            6 => Self::S2T0,
-            7 => Self::S2T1,
-            8 => Self::S2T2,
-            _ => unreachable!(),
+            0 => Ok(Self::S0T0),
+            1 => Ok(Self::S0T1),
+            2 => Ok(Self::S0T2),
+            3 => Ok(Self::S1T0),
+            4 => Ok(Self::S1T1),
+            5 => Ok(Self::S1T2),
+            6 => Ok(Self::S2T0),
+            7 => Ok(Self::S2T1),
+            8 => Ok(Self::S2T2),
+            _ => Err(()),
         }
     }
 }
@@ -341,23 +345,49 @@ impl Depacketizer for Vp9Depacketizer {
             payload_index = self.parse_ssdata(&mut reader, payload_index)?;
         }
 
-        let layer = Layer::from((self.sid, self.tid));
-        let mut range = (out.len(), out.len() + packet.len() - payload_index);
+        if self.l && self.f {
+            // Here is always Ok() or the packet has been depacketized wrong.
+            let layer = Layer::try_from((self.sid, self.tid)).unwrap();
+            let mut range = (out.len(), out.len() + packet.len() - payload_index);
+            let widths = {
+                let mut res = [None; 3];
 
-        if let CodecExtra::Vp9(e) = extra {
-            if let Some((start, stop)) = e.layer_scheme[layer as usize] {
-                if stop == range.0 {
-                    e.layer_scheme[layer as usize] = Some((start, range.1))
-                } else {
-                    unreachable!()
+                for (idx, width) in self.width.iter().take(3).enumerate() {
+                    res[idx] = Some(*width);
                 }
+
+                res
+            };
+            let heights = {
+                let mut res = [None; 3];
+
+                for (idx, height) in self.height.iter().take(3).enumerate() {
+                    res[idx] = Some(*height);
+                }
+
+                res
+            };
+
+            if let CodecExtra::Vp9(e) = extra {
+                if let Some((start, stop)) = e.layer_scheme[layer as usize] {
+                    if stop == range.0 {
+                        e.layer_scheme[layer as usize] = Some((start, range.1))
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    e.layer_scheme[layer as usize] = Some(range);
+                }
+
+                e.layer_widths = widths;
+                e.layer_heights = heights;
             } else {
-                e.layer_scheme[layer as usize] = Some(range);
+                let mut vp9_extra = Vp9CodecExtra::default();
+                vp9_extra.layer_scheme[layer as usize] = Some(range);
+                vp9_extra.layer_widths = widths;
+                vp9_extra.layer_heights = heights;
+                *extra = CodecExtra::Vp9(vp9_extra);
             }
-        } else {
-            let mut vp9_extra = Vp9CodecExtra::default();
-            vp9_extra.layer_scheme[layer as usize] = Some(range);
-            *extra = CodecExtra::Vp9(vp9_extra);
         }
 
         out.extend_from_slice(&packet[payload_index..]);
