@@ -132,6 +132,10 @@ pub enum PacketError {
     StapASizeLargerThanBuffer(usize, usize),
     #[error("H264 NALU type is not handled: {0}")]
     NaluTypeIsNotHandled(u8),
+    #[error("Unable to parse SVC layer")]
+    UnableToParseSvcLayer,
+    #[error("VP9 corrupted packet")]
+    ErrVP9CorruptedPacket,
 }
 
 /// Helper to replace Bytes. Provides get_u8 and get_u16 over some buffer of bytes.

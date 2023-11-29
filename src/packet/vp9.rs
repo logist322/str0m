@@ -293,8 +293,8 @@ pub struct Vp9Depacketizer {
     pub g: bool,
     /// N_G indicates the number of pictures in a Picture Group (PG)
     pub ng: u8,
-    pub width: Vec<u16>,
-    pub height: Vec<u16>,
+    pub width: [Option<u16>; MAX_SPATIAL_LAYERS as usize],
+    pub height: [Option<u16>; MAX_SPATIAL_LAYERS as usize],
     /// Temporal layer ID of pictures in a Picture Group
     pub pgtid: Vec<u8>,
     /// Switching up point of pictures in a Picture Group
@@ -345,49 +345,8 @@ impl Depacketizer for Vp9Depacketizer {
             payload_index = self.parse_ssdata(&mut reader, payload_index)?;
         }
 
-        if self.l && self.f {
-            // Here is always Ok() or the packet has been depacketized wrong.
-            let layer = Layer::try_from((self.sid, self.tid)).unwrap();
-            let mut range = (out.len(), out.len() + packet.len() - payload_index);
-            let widths = {
-                let mut res = [None; 3];
-
-                for (idx, width) in self.width.iter().take(3).enumerate() {
-                    res[idx] = Some(*width);
-                }
-
-                res
-            };
-            let heights = {
-                let mut res = [None; 3];
-
-                for (idx, height) in self.height.iter().take(3).enumerate() {
-                    res[idx] = Some(*height);
-                }
-
-                res
-            };
-
-            if let CodecExtra::Vp9(e) = extra {
-                if let Some((start, stop)) = e.layer_scheme[layer as usize] {
-                    if stop == range.0 {
-                        e.layer_scheme[layer as usize] = Some((start, range.1))
-                    } else {
-                        unreachable!()
-                    }
-                } else {
-                    e.layer_scheme[layer as usize] = Some(range);
-                }
-
-                e.layer_widths = widths;
-                e.layer_heights = heights;
-            } else {
-                let mut vp9_extra = Vp9CodecExtra::default();
-                vp9_extra.layer_scheme[layer as usize] = Some(range);
-                vp9_extra.layer_widths = widths;
-                vp9_extra.layer_heights = heights;
-                *extra = CodecExtra::Vp9(vp9_extra);
-            }
+        if self.l {
+            self.update_extra(extra, out.len(), packet.len(), payload_index)?;
         }
 
         out.extend_from_slice(&packet[payload_index..]);
@@ -410,6 +369,34 @@ impl Depacketizer for Vp9Depacketizer {
 }
 
 impl Vp9Depacketizer {
+    fn update_extra(&mut self, extra: &mut CodecExtra, out_len: usize, packet_len: usize, payload_index: usize) -> Result<(), PacketError> {
+        let layer = Layer::try_from((self.sid, self.tid)).map_err(|_| PacketError::UnableToParseSvcLayer )?;
+        let mut range = (out_len, out_len + packet_len - payload_index);
+
+        if let CodecExtra::Vp9(e) = extra {
+            if let Some((start, stop)) = e.layer_scheme[layer as usize] {
+                if stop == range.0 {
+                    e.layer_scheme[layer as usize] = Some((start, range.1));
+                } else {
+                    return Err(PacketError::ErrVP9CorruptedPacket);
+                }
+            } else {
+                e.layer_scheme[layer as usize] = Some(range);
+            }
+
+            e.layer_widths.copy_from_slice(&self.width[..3]);
+            e.layer_heights.copy_from_slice(&self.height[..3]);
+        } else {
+            let mut vp9_extra = Vp9CodecExtra::default();
+            vp9_extra.layer_scheme[layer as usize] = Some(range);
+            vp9_extra.layer_widths.copy_from_slice(&self.width[..3]);
+            vp9_extra.layer_heights.copy_from_slice(&self.height[..3]);
+            *extra = CodecExtra::Vp9(vp9_extra);
+        }
+
+        Ok(())
+    }
+
     // Picture ID:
     //
     //      +-+-+-+-+-+-+-+-+
@@ -580,11 +567,11 @@ impl Vp9Depacketizer {
                 return Err(PacketError::ErrShortPacket);
             }
 
-            self.width = vec![0u16; ns];
-            self.height = vec![0u16; ns];
+            // self.width = [0u16; ns];
+            // self.height = [0u16; ns];
             for i in 0..ns {
-                self.width[i] = reader.get_u16();
-                self.height[i] = reader.get_u16();
+                self.width[i] = Some(reader.get_u16());
+                self.height[i] = Some(reader.get_u16());
             }
             payload_index += 4 * ns;
         }
@@ -806,8 +793,20 @@ mod test {
                     y: true,
                     g: false,
                     ng: 0,
-                    width: vec![640, 1280],
-                    height: vec![360, 720],
+                    width: {
+                        let mut res = [None; MAX_SPATIAL_LAYERS as usize];
+                        res[0] = Some(640);
+                        res[1] = Some(1280);
+
+                        res
+                    },
+                    height: {
+                        let mut res = [None; MAX_SPATIAL_LAYERS as usize];
+                        res[0] = Some(360);
+                        res[1] = Some(720);
+
+                        res
+                    },
                     ..Default::default()
                 },
                 &[],
