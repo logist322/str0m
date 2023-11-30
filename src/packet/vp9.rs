@@ -427,26 +427,25 @@ impl Vp9Depacketizer {
             .map_err(|_| PacketError::UnableToParseSvcLayer)?;
         let mut range = (out_len, out_len + packet_len - payload_index);
 
-        if let CodecExtra::Vp9(e) = extra {
-            if let Some((start, stop)) = e.layers_scheme[layer as usize] {
-                if stop == range.0 {
-                    e.layers_scheme[layer as usize] = Some((start, range.1));
-                } else {
-                    return Err(PacketError::ErrVP9CorruptedPacket);
-                }
-            } else {
-                e.layers_scheme[layer as usize] = Some(range);
-            }
+        let mut vp9_extra = match extra {
+            CodecExtra::Vp9(e) => *e,
+            _ => Vp9CodecExtra::default(),
+        };
 
-            e.layers_widths.copy_from_slice(&self.width[..3]);
-            e.layers_heights.copy_from_slice(&self.height[..3]);
+        if let Some((start, stop)) = vp9_extra.layers_scheme[layer as usize] {
+            if stop == range.0 {
+                vp9_extra.layers_scheme[layer as usize] = Some((start, range.1));
+            } else {
+                return Err(PacketError::ErrVP9CorruptedPacket);
+            }
         } else {
-            let mut vp9_extra = Vp9CodecExtra::default();
             vp9_extra.layers_scheme[layer as usize] = Some(range);
-            vp9_extra.layers_widths.copy_from_slice(&self.width[..3]);
-            vp9_extra.layers_heights.copy_from_slice(&self.height[..3]);
-            *extra = CodecExtra::Vp9(vp9_extra);
         }
+
+        vp9_extra.layers_widths.copy_from_slice(&self.width[..3]);
+        vp9_extra.layers_heights.copy_from_slice(&self.height[..3]);
+
+        *extra = CodecExtra::Vp9(vp9_extra);
 
         Ok(())
     }
