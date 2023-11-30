@@ -434,14 +434,13 @@ impl Vp9Depacketizer {
 
         if let Some((start, stop)) = vp9_extra.layers_scheme[layer as usize] {
             if stop == range.0 {
-                vp9_extra.layers_scheme[layer as usize] = Some((start, range.1));
+                range.0 = start;
             } else {
                 return Err(PacketError::ErrVP9CorruptedPacket);
             }
-        } else {
-            vp9_extra.layers_scheme[layer as usize] = Some(range);
         }
-
+        
+        vp9_extra.layers_scheme[layer as usize] = Some(range);
         vp9_extra.layers_widths.copy_from_slice(&self.width[..3]);
         vp9_extra.layers_heights.copy_from_slice(&self.height[..3]);
 
