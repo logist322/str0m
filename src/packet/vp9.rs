@@ -43,7 +43,7 @@ pub struct Vp9CodecExtra {
     ///     // Found ranges of chunks of needed `layer`s.
     ///     let layers_ranges =
     ///         vp9_extra
-    ///             .layer_scheme
+    ///             .layers_scheme
     ///             .into_iter()
     ///             .enumerate()
     ///             .filter_map(|(idx, range)| {
@@ -65,17 +65,17 @@ pub struct Vp9CodecExtra {
     ///         });
     /// }
     /// ```
-    pub layer_scheme: [Option<(usize, usize)>; 9],
+    pub layers_scheme: [Option<(usize, usize)>; 9],
 
     /// Map of the SVC layers widths.
     ///
     /// Specified for every spatial layer.
-    pub layer_widths: [Option<u16>; 3],
+    pub layers_widths: [Option<u16>; 3],
 
     /// Map of the SVC layers heights.
     ///
     /// Specified for every spatial layer.
-    pub layer_heights: [Option<u16>; 3],
+    pub layers_heights: [Option<u16>; 3],
 }
 
 /// Layer (combination on spatial and temporal layers) of VP9 SVC.
@@ -428,23 +428,23 @@ impl Vp9Depacketizer {
         let mut range = (out_len, out_len + packet_len - payload_index);
 
         if let CodecExtra::Vp9(e) = extra {
-            if let Some((start, stop)) = e.layer_scheme[layer as usize] {
+            if let Some((start, stop)) = e.layers_scheme[layer as usize] {
                 if stop == range.0 {
-                    e.layer_scheme[layer as usize] = Some((start, range.1));
+                    e.layers_scheme[layer as usize] = Some((start, range.1));
                 } else {
                     return Err(PacketError::ErrVP9CorruptedPacket);
                 }
             } else {
-                e.layer_scheme[layer as usize] = Some(range);
+                e.layers_scheme[layer as usize] = Some(range);
             }
 
-            e.layer_widths.copy_from_slice(&self.width[..3]);
-            e.layer_heights.copy_from_slice(&self.height[..3]);
+            e.layers_widths.copy_from_slice(&self.width[..3]);
+            e.layers_heights.copy_from_slice(&self.height[..3]);
         } else {
             let mut vp9_extra = Vp9CodecExtra::default();
-            vp9_extra.layer_scheme[layer as usize] = Some(range);
-            vp9_extra.layer_widths.copy_from_slice(&self.width[..3]);
-            vp9_extra.layer_heights.copy_from_slice(&self.height[..3]);
+            vp9_extra.layers_scheme[layer as usize] = Some(range);
+            vp9_extra.layers_widths.copy_from_slice(&self.width[..3]);
+            vp9_extra.layers_heights.copy_from_slice(&self.height[..3]);
             *extra = CodecExtra::Vp9(vp9_extra);
         }
 
