@@ -1,6 +1,5 @@
 use super::{BitRead, CodecExtra, Depacketizer, MediaKind, PacketError, Packetizer};
 
-use std::collections::HashMap;
 use std::fmt;
 use std::panic::RefUnwindSafe;
 use std::panic::UnwindSafe;
@@ -18,17 +17,63 @@ pub type InitialPictureIDFn = Arc<dyn (Fn() -> u16) + Send + Sync + UnwindSafe +
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Vp9CodecExtra {
     /// Map of the SVC layers.
-    /// 
-    /// Position of chunks of [`Layer`]s.
+    ///
+    /// Index of each element corresponds to [`Layer`] represented
+    /// as [`usize`].
+    /// If [`Some`] that means there is corresponded [`Layer`]
+    /// in [`MediaData::data`] on represented range.
+    /// If [`None`] that means there is no corresponded [`Layer`]
+    /// in [`MediaData::data`].
+    ///
+    /// [`MediaData::data`]: crate::media::MediaData::data
+    ///
+    /// ## Example
+    ///
+    /// Say you have VP9 track working in "L3T3" scalability mode and you
+    /// want to retranslate S1T2 layer. So you need to retranslate the all
+    /// spatial and temporal layers <= target layer.
+    ///
+    /// ```no_run
+    /// // We want to receive S1T2 layer.
+    /// let target_layer = Layer::S1T2;
+    ///
+    /// let media_data: MediaData = todo!();
+    ///
+    /// if let CodecExtra::Vp9(vp9_extra) = media_data.codec_extra {
+    ///     // Found ranges of chunks of needed `layer`s.
+    ///     let layers_ranges =
+    ///         vp9_extra
+    ///             .layer_scheme
+    ///             .into_iter()
+    ///             .enumerate()
+    ///             .filter_map(|(idx, range)| {
+    ///                 // Parse `Layer` from `idx`.
+    ///                 let layer: Layer = idx.try_into().unwrap();
+    ///
+    ///                 // Check if we need this `layer`.
+    ///                 (layer.spatial() <= target_layer.spatial()
+    ///                     && layer.temporal() <= target_layer.temporal())
+    ///                 .then_some(range)
+    ///                 .flatten()
+    ///             });
+    ///
+    ///     // Compiled data of selected `layer`s.
+    ///     let selected_data: Vec<u8> = layers_ranges.fold(
+    ///         Vec::new(), |mut acc, (start, stop)| {
+    ///             acc.extend(media_data.data[start..stop].iter());
+    ///             acc
+    ///         });
+    /// }
+    /// ```
     pub layer_scheme: [Option<(usize, usize)>; 9],
-    
+
     /// Map of the SVC layers widths.
-    /// 
+    ///
     /// Specified for every spatial layer.
     pub layer_widths: [Option<u16>; 3],
-    
+
     /// Map of the SVC layers heights.
-    /// 
+    ///
     /// Specified for every spatial layer.
     pub layer_heights: [Option<u16>; 3],
 }
@@ -369,8 +414,17 @@ impl Depacketizer for Vp9Depacketizer {
 }
 
 impl Vp9Depacketizer {
-    fn update_extra(&mut self, extra: &mut CodecExtra, out_len: usize, packet_len: usize, payload_index: usize) -> Result<(), PacketError> {
-        let layer = Layer::try_from((self.sid, self.tid)).map_err(|_| PacketError::UnableToParseSvcLayer )?;
+    /// Updates provided [`CodecExtra`].
+    /// __MUST__ be called after the all transformations of `payload_index`.
+    fn update_extra(
+        &mut self,
+        extra: &mut CodecExtra,
+        out_len: usize,
+        packet_len: usize,
+        payload_index: usize,
+    ) -> Result<(), PacketError> {
+        let layer = Layer::try_from((self.sid, self.tid))
+            .map_err(|_| PacketError::UnableToParseSvcLayer)?;
         let mut range = (out_len, out_len + packet_len - payload_index);
 
         if let CodecExtra::Vp9(e) = extra {
@@ -567,8 +621,6 @@ impl Vp9Depacketizer {
                 return Err(PacketError::ErrShortPacket);
             }
 
-            // self.width = [0u16; ns];
-            // self.height = [0u16; ns];
             for i in 0..ns {
                 self.width[i] = Some(reader.get_u16());
                 self.height[i] = Some(reader.get_u16());

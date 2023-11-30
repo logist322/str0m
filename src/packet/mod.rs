@@ -28,7 +28,7 @@ pub use vp8::Vp8CodecExtra;
 use vp8::{Vp8Depacketizer, Vp8Packetizer};
 
 mod vp9;
-pub use vp9::{Vp9CodecExtra, Layer};
+pub use vp9::{Layer, Vp9CodecExtra};
 use vp9::{Vp9Depacketizer, Vp9Packetizer};
 
 mod null;
@@ -87,8 +87,8 @@ pub enum CodecExtra {
     None,
     /// Codec extra parameters for VP8.
     Vp8(Vp8CodecExtra),
-    /// keklol
-    Vp9(Vp9CodecExtra)
+    /// Codec extra parameters for VP9.
+    Vp9(Vp9CodecExtra),
 }
 
 /// Depacketizes an RTP payload.
