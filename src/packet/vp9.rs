@@ -33,7 +33,7 @@ pub struct Vp9CodecExtra {
     /// want to retranslate S1T2 layer. So you need to retranslate the all
     /// spatial and temporal layers <= target layer.
     ///
-    /// ```no_run
+    /// ```ignore
     /// // We want to receive S1T2 layer.
     /// let target_layer = Layer::S1T2;
     ///
@@ -76,6 +76,9 @@ pub struct Vp9CodecExtra {
     ///
     /// Specified for every spatial layer.
     pub layers_heights: [Option<u16>; 3],
+
+    /// asd
+    pub pid: u16
 }
 
 /// Layer (combination on spatial and temporal layers) of VP9 SVC.
@@ -440,6 +443,7 @@ impl Vp9Depacketizer {
             }
         }
         
+        vp9_extra.pid = self.picture_id;
         vp9_extra.layers_scheme[layer as usize] = Some(range);
         vp9_extra.layers_widths.copy_from_slice(&self.width[..3]);
         vp9_extra.layers_heights.copy_from_slice(&self.height[..3]);

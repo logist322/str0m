@@ -863,7 +863,7 @@ pub enum Event {
     MediaAdded(MediaAdded),
 
     /// Incoming media data sent by the remote peer.
-    MediaData(MediaData),
+    MediaData(Box<MediaData>),
 
     /// Changes to the media may be emitted.
     ///

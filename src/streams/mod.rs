@@ -711,7 +711,7 @@ impl fmt::Debug for RtpPacket {
             .field("seq_no", &self.seq_no)
             .field("time", &self.time)
             .field("header", &self.header)
-            .field("payload", &self.payload.len())
+            .field("payload", &self.payload)
             .field("nackable", &self.nackable)
             .field("timestamp", &self.timestamp)
             .finish()

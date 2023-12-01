@@ -575,7 +575,7 @@ impl Session {
 
             if let Some(r) = media.poll_sample(&self.codec_config) {
                 match r {
-                    Ok(v) => return Some(Event::MediaData(v)),
+                    Ok(v) => return Some(Event::MediaData(Box::new(v))),
                     Err(e) => return Some(Event::Error(e)),
                 }
             }
