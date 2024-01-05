@@ -178,7 +178,7 @@ impl Packetizer for Vp9Packetizer {
             self.initialized = true;
         }
 
-        let max_fragment_size = mtu as isize - VP9HEADER_SIZE as isize;
+        let max_fragment_size = mtu as isize - VP9HEADER_SIZE as isize - 5;
         let mut payloads = vec![];
         let mut payload_data_remaining = payload.len();
         let mut payload_data_index = 0;
@@ -190,8 +190,8 @@ impl Packetizer for Vp9Packetizer {
         while payload_data_remaining > 0 {
             let current_fragment_size =
                 std::cmp::min(max_fragment_size as usize, payload_data_remaining);
-            let mut out = Vec::with_capacity(VP9HEADER_SIZE + current_fragment_size);
-            let mut buf = [0u8; VP9HEADER_SIZE];
+            let mut out = Vec::with_capacity(VP9HEADER_SIZE + 5 + current_fragment_size);
+            let mut buf = [0u8; VP9HEADER_SIZE + 5];
             buf[0] = 0x90; // F=1 I=1
             if payload_data_index == 0 {
                 buf[0] |= 0x08; // B=1
@@ -199,8 +199,15 @@ impl Packetizer for Vp9Packetizer {
             if payload_data_remaining == current_fragment_size {
                 buf[0] |= 0x04; // E=1
             }
+            buf[0] |= 0x02; // V=1
             buf[1] = (self.picture_id >> 8) as u8 | 0x80;
             buf[2] = (self.picture_id & 0xFF) as u8;
+            buf[3] = 0x10; // SS 1st line
+            buf[4] = 0x05;
+            buf[5] = 0x00;
+            buf[6] = 0x02;
+            buf[7] = 0xD0;
+            // 00000010 11010000
 
             out.extend_from_slice(&buf[..]);
 
