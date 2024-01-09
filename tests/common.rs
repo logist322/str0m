@@ -16,7 +16,7 @@ use str0m::rtp::ExtensionMap;
 use str0m::rtp::RtpHeader;
 use str0m::Candidate;
 use str0m::{Event, Input, Output, Rtc, RtcError};
-use tracing::info_span;
+use tracing::{info_span, Level};
 use tracing::Span;
 
 pub struct TestRtc {

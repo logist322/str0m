@@ -3,8 +3,9 @@ extern crate tracing;
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::ops::Deref;
+use std::os::unix::process::parent_id;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Weak};
@@ -18,7 +19,9 @@ use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
+use str0m::rtp::RtpPacket;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
+use systemstat::{data, Ipv4Addr};
 
 mod util;
 
@@ -43,7 +46,8 @@ pub fn main() {
     let private_key = include_bytes!("key.pem").to_vec();
 
     // Figure out some public IP address, since Firefox will not accept 127.0.0.1 for WebRTC traffic.
-    let host_addr = util::select_host_address();
+    // let host_addr = util::select_host_address();
+    let host_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 81));
 
     let (tx, rx) = mpsc::sync_channel(1);
 
@@ -56,12 +60,9 @@ pub fn main() {
     // The run loop is on a separate thread to the web server.
     thread::spawn(move || run(socket, rx));
 
-    let server = Server::new_ssl(
-        "0.0.0.0:3000",
-        move |request| web_request(request, addr, tx.clone()),
-        certificate,
-        private_key,
-    )
+    let server = Server::new("0.0.0.0:3000", move |request| {
+        web_request(request, addr, tx.clone())
+    })
     .expect("starting the web server");
 
     let port = server.server_addr().port();
@@ -81,6 +82,7 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
 
     let offer: SdpOffer = serde_json::from_reader(&mut data).expect("serialized offer");
     let mut rtc = Rtc::builder()
+        .set_rtp_mode(true)
         // Uncomment this to see statistics
         // .set_stats_interval(Some(Duration::from_secs(1)))
         // .set_ice_lite(true)
@@ -187,6 +189,7 @@ fn poll_until_timeout(
     loop {
         if !client.rtc.is_alive() {
             // This client will be cleaned up in the next run of the main loop.
+            info!("bbbbbbbbbbbbbbbbbbbbbbbbbbb");
             return Instant::now();
         }
 
@@ -224,7 +227,13 @@ fn propagate(propagated: &Propagated, clients: &mut [Client]) {
                     client.handle_keyframe_request(*req, *mid_in)
                 }
             }
-            Propagated::Noop | Propagated::Timeout(_) => {}
+            Propagated::Noop => {
+                info!("vvvvvvvvvvvvvvvvvvvvv");
+            }
+            Propagated::Timeout(_) => {}
+            Propagated::RtpPacket(_, packet) => {
+                client.handle_packet(client_id, packet);
+            }
         }
     }
 }
@@ -372,6 +381,7 @@ impl Client {
     fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> Propagated {
         match output {
             Output::Transmit(transmit) => {
+                // info!("transmiiiiit {transmit:?}");
                 socket
                     .send_to(&transmit.contents, transmit.destination)
                     .expect("sending UDP data");
@@ -408,6 +418,10 @@ impl Client {
                 Event::PeerStats(data) => {
                     info!("{:?}", data);
                     Propagated::Noop
+                }
+                Event::RtpPacket(data) => {
+                    info!("propadated packetttttttttttt");
+                    Propagated::RtpPacket(self.id, data)
                 }
                 _ => Propagated::Noop,
             },
@@ -626,6 +640,66 @@ impl Client {
         }
     }
 
+    fn handle_packet(&mut self, origin: ClientId, packet: &RtpPacket) {
+        // Figure out which outgoing track maps to the incoming media data.
+        let Some(mid) = self
+            .tracks_out
+            .iter()
+            .find(|o| {
+                o.track_in
+                    .upgrade()
+                    .filter(|i| i.origin == origin && i.kind == MediaKind::Video)
+                    .is_some()
+            })
+            .and_then(|o| o.mid())
+        else {
+            info!("rrrrrrrrrrrr");
+            return;
+        };
+
+        // if data.rid.is_some() && data.rid != Some("h".into()) {
+        //     // This is where we plug in a selection strategy for simulcast. For
+        //     // now either let rid=None through (which would be no simulcast layers)
+        //     // or "h" if we have simulcast (see commented out code in chat.html).
+        //     return;
+        // }
+
+        // Remember this value for keyframe requests.
+        // if self.chosen_rid != data.rid {
+        //     self.chosen_rid = data.rid;
+        // }
+
+        let mut dir = self.rtc.direct_api();
+
+        let Some(writer) = dir.stream_tx_by_mid(mid, None) else {
+            info!("ggggggggggg");
+            return;
+        };
+
+        // Match outgoing pt to incoming codec.
+        // let Some(pt) = writer.match_params(data.params) else {
+        //     return;
+        // };
+
+        info!("writeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
+        _ = writer.write_rtp(
+            packet.header.payload_type,
+            packet.seq_no,
+            packet.time.denom(),
+            packet.timestamp,
+            packet.header.marker,
+            packet.header.ext_vals.clone(),
+            false,
+            packet.payload.clone(),
+        );
+
+        // if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
+        //     warn!("Client ({}) failed: {:?}", *self.id, e);
+        //     self.rtc.disconnect();
+        // }
+    }
+
     fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
         let has_incoming_track = self.tracks_in.iter().any(|i| i.id.mid == mid_in);
 
@@ -647,7 +721,7 @@ impl Client {
 
 /// Events propagated between client.
 #[allow(clippy::large_enum_variant)]
-
+#[derive(Debug)]
 enum Propagated {
     /// When we have nothing to propagate.
     Noop,
@@ -663,6 +737,8 @@ enum Propagated {
 
     /// A keyframe request from one client to the source.
     KeyframeRequest(ClientId, KeyframeRequest, ClientId, Mid),
+
+    RtpPacket(ClientId, RtpPacket),
 }
 
 impl Propagated {
@@ -671,7 +747,8 @@ impl Propagated {
         match self {
             Propagated::TrackOpen(c, _)
             | Propagated::MediaData(c, _)
-            | Propagated::KeyframeRequest(c, _, _, _) => Some(*c),
+            | Propagated::KeyframeRequest(c, _, _, _)
+            | Propagated::RtpPacket(c, _) => Some(*c),
             _ => None,
         }
     }
