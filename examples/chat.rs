@@ -1,15 +1,13 @@
 #[macro_use]
 extern crate tracing;
 
-use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::ops::Deref;
-use std::os::unix::process::parent_id;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Weak};
-use std::thread;
+use std::thread::{self, panicking};
 use std::time::{Duration, Instant};
 
 use rouille::Server;
@@ -20,8 +18,9 @@ use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
 use str0m::rtp::RtpPacket;
-use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
-use systemstat::{data, Ipv4Addr};
+use str0m::Event;
+use str0m::{net::Receive, Candidate, IceConnectionState, Input, Output, Rtc, RtcError};
+use systemstat::Ipv4Addr;
 
 mod util;
 
@@ -110,7 +109,6 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
 /// and forwards media data between clients.
 fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
     let mut clients: Vec<Client> = vec![];
-    let mut to_propagate: VecDeque<Propagated> = VecDeque::new();
     let mut buf = vec![0; 2000];
 
     loop {
@@ -128,24 +126,16 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
             clients.push(client);
         }
 
-        // Poll clients until they return timeout
-        let mut timeout = Instant::now() + Duration::from_millis(100);
-        for client in clients.iter_mut() {
-            let t = poll_until_timeout(client, &mut to_propagate, &socket);
-            timeout = timeout.min(t);
-        }
-
-        // If we have an item to propagate, do that
-        if let Some(p) = to_propagate.pop_front() {
-            propagate(&p, &mut clients);
-            continue;
-        }
-
-        // The read timeout is not allowed to be 0. In case it is 0, we set 1 millisecond.
-        let duration = (timeout - Instant::now()).max(Duration::from_millis(1));
+        // Poll all clients, and get propagated events as a result.
+        let to_propagate: Vec<_> = clients
+            .iter_mut()
+            .map(|c| c.poll_output(&socket))
+            .flatten()
+            .collect();
+        propagate(&mut clients, to_propagate);
 
         socket
-            .set_read_timeout(Some(duration))
+            .set_read_timeout(Some(Duration::from_micros(10)))
             .expect("setting socket read timeout");
 
         if let Some(input) = read_socket_input(&socket, &mut buf) {
@@ -179,60 +169,31 @@ fn spawn_new_client(rx: &Receiver<Rtc>) -> Option<Client> {
     }
 }
 
-/// Poll all the output from the client until it returns a timeout.
-/// Collect any output in the queue, transmit data on the socket, return the timeout
-fn poll_until_timeout(
-    client: &mut Client,
-    queue: &mut VecDeque<Propagated>,
-    socket: &UdpSocket,
-) -> Instant {
-    loop {
-        if !client.rtc.is_alive() {
-            // This client will be cleaned up in the next run of the main loop.
-            info!("bbbbbbbbbbbbbbbbbbbbbbbbbbb");
-            return Instant::now();
-        }
-
-        let propagated = client.poll_output(socket);
-
-        if let Propagated::Timeout(t) = propagated {
-            return t;
-        }
-
-        queue.push_back(propagated)
-    }
-}
-
-/// Sends one "propagated" to all clients, if relevant
-fn propagate(propagated: &Propagated, clients: &mut [Client]) {
-    // Do not propagate to originating client.
-    let Some(client_id) = propagated.client_id() else {
-        // If the event doesn't have a client id, it can't be propagated,
-        // (it's either a noop or a timeout).
-        return;
-    };
-
-    for client in &mut *clients {
-        if client.id == client_id {
-            // Do not propagate to originating client.
+fn propagate(clients: &mut [Client], to_propagate: Vec<Propagated>) {
+    for propagated in to_propagate {
+        let Some(client_id) = propagated.client_id() else {
+            // If the event doesn't have a client id, it can't be propagated,
+            // (it's either a noop or a timeout).
             continue;
-        }
+        };
 
-        match &propagated {
-            Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-            Propagated::MediaData(_, data) => client.handle_media_data_out(client_id, data),
-            Propagated::KeyframeRequest(_, req, origin, mid_in) => {
-                // Only one origin client handles the keyframe request.
-                if *origin == client.id {
-                    client.handle_keyframe_request(*req, *mid_in)
+        for client in &mut *clients {
+            if client.id == client_id {
+                // Do not propagate to originating client.
+                continue;
+            }
+
+            match &propagated {
+                Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
+                Propagated::MediaData(_, data) => client.handle_media_data_out(client_id, data),
+                Propagated::KeyframeRequest(_, req, origin, mid_in) => {
+                    // Only one origin client handles the keyframe request.
+                    if *origin == client.id {
+                        client.handle_keyframe_request(*req, *mid_in)
+                    }
                 }
-            }
-            Propagated::Noop => {
-                info!("vvvvvvvvvvvvvvvvvvvvv");
-            }
-            Propagated::Timeout(_) => {}
-            Propagated::RtpPacket(_, packet) => {
-                client.handle_packet(client_id, packet);
+                Propagated::RtpPacket(_, packet) => client.handle_packet(client_id, packet),
+                Propagated::Noop | Propagated::Timeout(_) => {}
             }
         }
     }
@@ -357,74 +318,76 @@ impl Client {
         }
     }
 
-    fn poll_output(&mut self, socket: &UdpSocket) -> Propagated {
+    fn poll_output(&mut self, socket: &UdpSocket) -> Vec<Propagated> {
         if !self.rtc.is_alive() {
-            return Propagated::Noop;
+            return vec![Propagated::Noop];
         }
 
         // Incoming tracks from other clients cause new entries in track_out that
         // need SDP negotiation with the remote peer.
         if self.negotiate_if_needed() {
-            return Propagated::Noop;
+            return vec![Propagated::Noop];
         }
 
-        match self.rtc.poll_output() {
-            Ok(output) => self.handle_output(output, socket),
-            Err(e) => {
-                warn!("Client ({}) poll_output failed: {:?}", *self.id, e);
-                self.rtc.disconnect();
-                Propagated::Noop
-            }
-        }
-    }
+        let mut propagate = Vec::new();
+        loop {
+            match self.rtc.poll_output() {
+                Ok(output) => {
+                    let p = match output {
+                        Output::Transmit(transmit) => {
+                            socket
+                                .send_to(&transmit.contents, transmit.destination)
+                                .expect("sending UDP data");
+                            Propagated::Noop
+                        }
+                        Output::Timeout(t) => {
+                            propagate.push(Propagated::Timeout(t));
 
-    fn handle_output(&mut self, output: Output, socket: &UdpSocket) -> Propagated {
-        match output {
-            Output::Transmit(transmit) => {
-                // info!("transmiiiiit {transmit:?}");
-                socket
-                    .send_to(&transmit.contents, transmit.destination)
-                    .expect("sending UDP data");
-                Propagated::Noop
-            }
-            Output::Timeout(t) => Propagated::Timeout(t),
-            Output::Event(e) => match e {
-                Event::IceConnectionStateChange(v) => {
-                    if v == IceConnectionState::Disconnected {
-                        // Ice disconnect could result in trying to establish a new connection,
-                        // but this impl just disconnects directly.
-                        self.rtc.disconnect();
-                    }
-                    Propagated::Noop
-                }
-                Event::MediaAdded(e) => self.handle_media_added(e.mid, e.kind),
-                Event::MediaData(data) => self.handle_media_data_in(data),
-                Event::KeyframeRequest(req) => self.handle_incoming_keyframe_req(req),
-                Event::ChannelOpen(cid, _) => {
-                    self.cid = Some(cid);
-                    Propagated::Noop
-                }
-                Event::ChannelData(data) => self.handle_channel_data(data),
+                            return propagate;
+                        }
+                        Output::Event(e) => match e {
+                            Event::IceConnectionStateChange(v) => {
+                                if v == IceConnectionState::Disconnected {
+                                    // Ice disconnect could result in trying to establish a new connection,
+                                    // but this impl just disconnects directly.
+                                    self.rtc.disconnect();
+                                }
+                                Propagated::Noop
+                            }
+                            Event::MediaAdded(e) => self.handle_media_added(e.mid, e.kind),
+                            Event::KeyframeRequest(req) => self.handle_incoming_keyframe_req(req),
+                            Event::ChannelOpen(cid, _) => {
+                                self.cid = Some(cid);
+                                Propagated::Noop
+                            }
+                            Event::ChannelData(data) => self.handle_channel_data(data),
 
-                // NB: To see statistics, uncomment set_stats_interval() above.
-                Event::MediaIngressStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
+                            // NB: To see statistics, uncomment set_stats_interval() above.
+                            Event::MediaIngressStats(data) => {
+                                info!("{:?}", data);
+                                Propagated::Noop
+                            }
+                            Event::MediaEgressStats(data) => {
+                                info!("{:?}", data);
+                                Propagated::Noop
+                            }
+                            Event::PeerStats(data) => {
+                                info!("{:?}", data);
+                                Propagated::Noop
+                            }
+                            Event::RtpPacket(data) => Propagated::RtpPacket(self.id, data),
+                            _ => Propagated::Noop,
+                        },
+                    };
+
+                    propagate.push(p);
                 }
-                Event::MediaEgressStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
+                Err(e) => {
+                    warn!("Client ({}) poll_output failed: {:?}", *self.id, e);
+                    self.rtc.disconnect();
+                    return Vec::new();
                 }
-                Event::PeerStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
-                }
-                Event::RtpPacket(data) => {
-                    info!("propadated packetttttttttttt");
-                    Propagated::RtpPacket(self.id, data)
-                }
-                _ => Propagated::Noop,
-            },
+            }
         }
     }
 
@@ -444,41 +407,6 @@ impl Client {
         self.tracks_in.push(track_in);
 
         Propagated::TrackOpen(self.id, weak)
-    }
-
-    fn handle_media_data_in(&mut self, data: MediaData) -> Propagated {
-        if !data.contiguous {
-            self.request_keyframe_throttled(data.mid, data.rid, KeyframeRequestKind::Fir);
-        }
-
-        Propagated::MediaData(self.id, data)
-    }
-
-    fn request_keyframe_throttled(
-        &mut self,
-        mid: Mid,
-        rid: Option<Rid>,
-        kind: KeyframeRequestKind,
-    ) {
-        let Some(mut writer) = self.rtc.writer(mid) else {
-            return;
-        };
-
-        let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == mid) else {
-            return;
-        };
-
-        if track_entry
-            .last_keyframe_request
-            .map(|t| t.elapsed() < Duration::from_secs(1))
-            .unwrap_or(false)
-        {
-            return;
-        }
-
-        _ = writer.request_keyframe(rid, kind);
-
-        track_entry.last_keyframe_request = Some(Instant::now());
     }
 
     fn handle_incoming_keyframe_req(&self, mut req: KeyframeRequest) -> Propagated {
@@ -653,51 +581,111 @@ impl Client {
             })
             .and_then(|o| o.mid())
         else {
-            info!("rrrrrrrrrrrr");
             return;
         };
-
-        // if data.rid.is_some() && data.rid != Some("h".into()) {
-        //     // This is where we plug in a selection strategy for simulcast. For
-        //     // now either let rid=None through (which would be no simulcast layers)
-        //     // or "h" if we have simulcast (see commented out code in chat.html).
-        //     return;
-        // }
-
-        // Remember this value for keyframe requests.
-        // if self.chosen_rid != data.rid {
-        //     self.chosen_rid = data.rid;
-        // }
 
         let mut dir = self.rtc.direct_api();
-
         let Some(writer) = dir.stream_tx_by_mid(mid, None) else {
-            info!("ggggggggggg");
             return;
         };
 
-        // Match outgoing pt to incoming codec.
-        // let Some(pt) = writer.match_params(data.params) else {
-        //     return;
-        // };
+        let mut payload = packet.payload.clone();
 
-        info!("writeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        let i = (payload.as_slice()[0] & 0x80) != 0;
+        let p = (payload.as_slice()[0] & 0x40) != 0;
+        let l = (payload.as_slice()[0] & 0x20) != 0;
+        let f = (payload.as_slice()[0] & 0x10) != 0;
+        let b = (payload.as_slice()[0] & 0x08) != 0;
+        let e = (payload.as_slice()[0] & 0x04) != 0;
+        let v = (payload.as_slice()[0] & 0x02) != 0;
+        let z = (payload.as_slice()[0] & 0x01) != 0;
+        let m = (payload.as_slice()[1] & 0x80) != 0;
 
-        _ = writer.write_rtp(
-            packet.header.payload_type,
-            packet.seq_no,
-            packet.time.denom(),
-            packet.timestamp,
-            packet.header.marker,
-            packet.header.ext_vals.clone(),
-            false,
-            packet.payload.clone(),
-        );
+        println!("before ssrc: {:?}\ni: {i}\np: {p}\nl: {l}\nf: {f}\nb: {b}\ne: {e}\nv: {v}\nz: {z}\nm: {m}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\nlen payload: {}\n\n\n", packet.header.ssrc, ((payload.as_slice()[1] & 0x7F) as u16) << 8 | payload.as_slice()[2] as u16, payload.as_slice()[3], payload.len());
 
-        // if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
-        //     warn!("Client ({}) failed: {:?}", *self.id, e);
-        //     self.rtc.disconnect();
+        let mut pl_ind = 3;
+
+        if l {
+            if f {
+                pl_ind += 1;
+            } else {
+                pl_ind += 2;
+            }
+        }
+
+        if p && f {
+            let mut b = 1u8;
+            while b != 0 {
+                let reader = payload.get(pl_ind).unwrap();
+                b = reader & 0x01;
+                pl_ind += 1;
+            }
+        }
+
+        if v {
+            let ns = payload.get(pl_ind).unwrap() >> 5;
+            let y = payload.get(pl_ind).unwrap() & 0x10 != 0;
+            let g = payload.get(pl_ind).unwrap() & 0x08 != 0;
+
+            pl_ind += 1;
+
+            let ns = (ns + 1) as usize;
+            let mut ng = 0;
+
+            if y {
+                pl_ind += 4 * ns;
+            }
+
+            if g {
+                ng = *payload.get(pl_ind).unwrap();
+                pl_ind += 1;
+            }
+
+            for _ in 0..ng as usize {
+                let b = *payload.get(pl_ind).unwrap();
+                pl_ind += 1;
+
+                let r = ((b >> 2) & 0x3) as usize;
+
+                for _ in 0..r {
+                    pl_ind += 1;
+                }
+            }
+        }
+
+        _ = payload.drain(5..pl_ind).collect::<Vec<u8>>();
+
+        // *payload.get_mut(0).unwrap() &= 0xFE;
+        *payload.get_mut(0).unwrap() &= 0x0C;
+        *payload.get_mut(0).unwrap() |= 0x90;
+
+        let ii = (payload.as_slice()[0] & 0x80) != 0;
+        let pp = (payload.as_slice()[0] & 0x40) != 0;
+        let ll = (payload.as_slice()[0] & 0x20) != 0;
+        let ff = (payload.as_slice()[0] & 0x10) != 0;
+        let bb = (payload.as_slice()[0] & 0x08) != 0;
+        let ee = (payload.as_slice()[0] & 0x04) != 0;
+        let vv = (payload.as_slice()[0] & 0x02) != 0;
+        let zz = (payload.as_slice()[0] & 0x01) != 0;
+
+        println!("after ssrc: {:?}\ni: {ii}\np: {pp}\nl: {ll}\nf: {ff}\nb: {bb}\ne: {ee}\nv: {vv}\nz: {zz}\nm: {m}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\nlen payload: {}\n\n\n", packet.header.ssrc, ((payload.as_slice()[1] & 0x7F) as u16) << 8 | payload.as_slice()[2] as u16, payload.as_slice()[3], payload.len());
+
+        // if v {
+        //     panic!("aaaaa");
         // }
+
+        writer
+            .write_rtp(
+                packet.header.payload_type,
+                packet.seq_no,
+                packet.time.numer() as u32,
+                packet.timestamp,
+                packet.header.marker,
+                packet.header.ext_vals.clone(),
+                false,
+                payload,
+            )
+            .unwrap();
     }
 
     fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
@@ -708,14 +696,18 @@ impl Client {
             return;
         }
 
-        let Some(mut writer) = self.rtc.writer(mid_in) else {
-            return;
-        };
+        let mut dir = self.rtc.direct_api();
+        let stream = dir.stream_rx_by_mid(mid_in, None).unwrap();
+        stream.request_keyframe(req.kind);
 
-        if let Err(e) = writer.request_keyframe(req.rid, req.kind) {
-            // This can fail if the rid doesn't match any media.
-            info!("request_keyframe failed: {:?}", e);
-        }
+        // let Some(mut writer) = self.rtc.writer(mid_in) else {
+        //     return;
+        // };
+        //
+        // if let Err(e) = writer.request_keyframe(req.rid, req.kind) {
+        //     // This can fail if the rid doesn't match any media.
+        //     info!("request_keyframe failed: {:?}", e);
+        // }
     }
 }
 

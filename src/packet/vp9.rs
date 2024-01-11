@@ -1,6 +1,7 @@
 use super::{BitRead, CodecExtra, Depacketizer, MediaKind, PacketError, Packetizer};
 
 use std::fmt;
+use std::ops::AddAssign;
 use std::panic::RefUnwindSafe;
 use std::panic::UnwindSafe;
 use std::sync::Arc;
@@ -178,7 +179,7 @@ impl Packetizer for Vp9Packetizer {
             self.initialized = true;
         }
 
-        let max_fragment_size = mtu as isize - VP9HEADER_SIZE as isize - 5;
+        let max_fragment_size = mtu as isize - VP9HEADER_SIZE as isize;
         let mut payloads = vec![];
         let mut payload_data_remaining = payload.len();
         let mut payload_data_index = 0;
@@ -190,8 +191,8 @@ impl Packetizer for Vp9Packetizer {
         while payload_data_remaining > 0 {
             let current_fragment_size =
                 std::cmp::min(max_fragment_size as usize, payload_data_remaining);
-            let mut out = Vec::with_capacity(VP9HEADER_SIZE + 5 + current_fragment_size);
-            let mut buf = [0u8; VP9HEADER_SIZE + 5];
+            let mut out = Vec::with_capacity(VP9HEADER_SIZE + current_fragment_size);
+            let mut buf = [0u8; VP9HEADER_SIZE];
             buf[0] = 0x90; // F=1 I=1
             if payload_data_index == 0 {
                 buf[0] |= 0x08; // B=1
@@ -199,15 +200,18 @@ impl Packetizer for Vp9Packetizer {
             if payload_data_remaining == current_fragment_size {
                 buf[0] |= 0x04; // E=1
             }
-            buf[0] |= 0x02; // V=1
+            // buf[0] |= 0x01; // Z=1
+
             buf[1] = (self.picture_id >> 8) as u8 | 0x80;
             buf[2] = (self.picture_id & 0xFF) as u8;
-            buf[3] = 0x10; // SS 1st line
-            buf[4] = 0x05;
-            buf[5] = 0x00;
-            buf[6] = 0x02;
-            buf[7] = 0xD0;
-            // 00000010 11010000
+            
+            // buf[0] |= 0x02; // V=1
+            // buf[3] = 0x10; // SS 1st line
+            // buf[4] = 0x05;
+            // buf[5] = 0x00;
+            // buf[6] = 0x02;
+            // buf[7] = 0xD0;
+            // // 00000010 11010000
 
             out.extend_from_slice(&buf[..]);
 
@@ -289,6 +293,8 @@ pub struct Vp9Depacketizer {
     pub pgu: Vec<bool>,
     /// Reference indices of pictures in a Picture Group
     pub pgpdiff: Vec<Vec<u8>>,
+
+    pub count: u8,
 }
 
 impl Depacketizer for Vp9Depacketizer {
@@ -328,14 +334,23 @@ impl Depacketizer for Vp9Depacketizer {
         if self.f && self.p {
             payload_index = self.parse_ref_indices(&mut reader, payload_index)?;
         }
-
+        
         if self.v {
             payload_index = self.parse_ssdata(&mut reader, payload_index)?;
         }
 
+        println!("i: {}\np: {}\nl: {}\nf: {}\nb: {}\ne: {}\nv: {}\nz: {}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\n\n\n", self.i, self.p, self.l, self.f, self.b, self.e, self.v, self.z, self.picture_id, self.tl0picidx);
+
         self.update_extra(extra, out.len(), packet.len(), payload_index)?;
 
         out.extend_from_slice(&packet[payload_index..]);
+
+        println!("\nextra: {extra:?}");
+
+        if self.count == 10 {
+            panic!("1111111111");
+        }
+        self.count.add_assign(1);
 
         Ok(())
     }
@@ -502,7 +517,7 @@ impl Vp9Depacketizer {
         mut payload_index: usize,
     ) -> Result<usize, PacketError> {
         let mut b = 1u8;
-        while (b & 0x1) != 0 {
+        while (b & 0x01) != 0 {
             if reader.remaining() == 0 {
                 return Err(PacketError::ErrShortPacket);
             }

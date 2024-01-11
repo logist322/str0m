@@ -66,8 +66,8 @@
             byId('cam').disabled = true;
             streamCam = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: 640,
-                    height: 360,
+                    width: 1280,
+                    height: 720,
                 },
             });
             const tr = rtc.addTransceiver(streamCam.getTracks()[0], {
@@ -91,10 +91,11 @@
 
                 // Uncomment this to enable simulcast. The actual selected
                 // simulcast level is hardcoded in chat.rs.
-                // sendEncodings: [
-                //     { rid: "h", maxBitrate: 700 * 1024 },
-                //     { rid: "l", maxBitrate: 150 * 1024 }
-                // ]
+                sendEncodings: [
+                    { rid: "h", active: true, scalabilityMode: "L3T3", codec: { clockRate: 90000, mimeType: 'video/VP9', sdpFmtpLine: "profile-id=0" } }
+                    // { rid: "h", maxBitrate: 700 * 1024 },
+                    // { rid: "l", maxBitrate: 150 * 1024 }
+                ]
             });
             await negotiate();
         }
@@ -119,7 +120,7 @@
                 return;
             }
             el.id = domId;
-            el.width = 500;
+            // el.width = 500;
             byId('media').appendChild(el);
             el.controls = true;
             el.autoplay = true;
@@ -128,14 +129,14 @@
                 media.addTrack(track);
                 el.srcObject = media;
             }, 1);
-            track.addEventListener('mute', () => {
-                console.log('track muted', track);
-                el.parentNode.removeChild(el);
-            });
-            track.addEventListener('unmute', () => {
-                console.log('track unmuted', track);
-                byId('media').appendChild(el);
-            });
+            // track.addEventListener('mute', () => {
+            //     console.log('track muted', track);
+            //     el.parentNode.removeChild(el);
+            // });
+            // track.addEventListener('unmute', () => {
+            //     console.log('track unmuted', track);
+            //     byId('media').appendChild(el);
+            // });
         };
         async function startRtc() {
             byId('rtc').disabled = true;
