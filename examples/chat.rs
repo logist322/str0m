@@ -46,7 +46,8 @@ pub fn main() {
 
     // Figure out some public IP address, since Firefox will not accept 127.0.0.1 for WebRTC traffic.
     // let host_addr = util::select_host_address();
-    let host_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 81));
+    // let host_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 81));
+    let host_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
     let (tx, rx) = mpsc::sync_channel(1);
 
@@ -185,7 +186,6 @@ fn propagate(clients: &mut [Client], to_propagate: Vec<Propagated>) {
 
             match &propagated {
                 Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-                Propagated::MediaData(_, data) => client.handle_media_data_out(client_id, data),
                 Propagated::KeyframeRequest(_, req, origin, mid_in) => {
                     // Only one origin client handles the keyframe request.
                     if *origin == client.id {
@@ -525,49 +525,6 @@ impl Client {
         self.tracks_out.push(track_out);
     }
 
-    fn handle_media_data_out(&mut self, origin: ClientId, data: &MediaData) {
-        // Figure out which outgoing track maps to the incoming media data.
-        let Some(mid) = self
-            .tracks_out
-            .iter()
-            .find(|o| {
-                o.track_in
-                    .upgrade()
-                    .filter(|i| i.origin == origin && i.mid == data.mid)
-                    .is_some()
-            })
-            .and_then(|o| o.mid())
-        else {
-            return;
-        };
-
-        if data.rid.is_some() && data.rid != Some("h".into()) {
-            // This is where we plug in a selection strategy for simulcast. For
-            // now either let rid=None through (which would be no simulcast layers)
-            // or "h" if we have simulcast (see commented out code in chat.html).
-            return;
-        }
-
-        // Remember this value for keyframe requests.
-        if self.chosen_rid != data.rid {
-            self.chosen_rid = data.rid;
-        }
-
-        let Some(writer) = self.rtc.writer(mid) else {
-            return;
-        };
-
-        // Match outgoing pt to incoming codec.
-        let Some(pt) = writer.match_params(data.params) else {
-            return;
-        };
-
-        if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
-            warn!("Client ({}) failed: {:?}", *self.id, e);
-            self.rtc.disconnect();
-        }
-    }
-
     fn handle_packet(&mut self, origin: ClientId, packet: &RtpPacket) {
         // Figure out which outgoing track maps to the incoming media data.
         let Some(mid) = self
@@ -589,91 +546,6 @@ impl Client {
             return;
         };
 
-        let mut payload = packet.payload.clone();
-
-        let i = (payload.as_slice()[0] & 0x80) != 0;
-        let p = (payload.as_slice()[0] & 0x40) != 0;
-        let l = (payload.as_slice()[0] & 0x20) != 0;
-        let f = (payload.as_slice()[0] & 0x10) != 0;
-        let b = (payload.as_slice()[0] & 0x08) != 0;
-        let e = (payload.as_slice()[0] & 0x04) != 0;
-        let v = (payload.as_slice()[0] & 0x02) != 0;
-        let z = (payload.as_slice()[0] & 0x01) != 0;
-        let m = (payload.as_slice()[1] & 0x80) != 0;
-
-        println!("before ssrc: {:?}\ni: {i}\np: {p}\nl: {l}\nf: {f}\nb: {b}\ne: {e}\nv: {v}\nz: {z}\nm: {m}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\nlen payload: {}\n\n\n", packet.header.ssrc, ((payload.as_slice()[1] & 0x7F) as u16) << 8 | payload.as_slice()[2] as u16, payload.as_slice()[3], payload.len());
-
-        let mut pl_ind = 3;
-
-        if l {
-            if f {
-                pl_ind += 1;
-            } else {
-                pl_ind += 2;
-            }
-        }
-
-        if p && f {
-            let mut b = 1u8;
-            while b != 0 {
-                let reader = payload.get(pl_ind).unwrap();
-                b = reader & 0x01;
-                pl_ind += 1;
-            }
-        }
-
-        if v {
-            let ns = payload.get(pl_ind).unwrap() >> 5;
-            let y = payload.get(pl_ind).unwrap() & 0x10 != 0;
-            let g = payload.get(pl_ind).unwrap() & 0x08 != 0;
-
-            pl_ind += 1;
-
-            let ns = (ns + 1) as usize;
-            let mut ng = 0;
-
-            if y {
-                pl_ind += 4 * ns;
-            }
-
-            if g {
-                ng = *payload.get(pl_ind).unwrap();
-                pl_ind += 1;
-            }
-
-            for _ in 0..ng as usize {
-                let b = *payload.get(pl_ind).unwrap();
-                pl_ind += 1;
-
-                let r = ((b >> 2) & 0x3) as usize;
-
-                for _ in 0..r {
-                    pl_ind += 1;
-                }
-            }
-        }
-
-        _ = payload.drain(5..pl_ind).collect::<Vec<u8>>();
-
-        // *payload.get_mut(0).unwrap() &= 0xFE;
-        *payload.get_mut(0).unwrap() &= 0x0C;
-        *payload.get_mut(0).unwrap() |= 0x90;
-
-        let ii = (payload.as_slice()[0] & 0x80) != 0;
-        let pp = (payload.as_slice()[0] & 0x40) != 0;
-        let ll = (payload.as_slice()[0] & 0x20) != 0;
-        let ff = (payload.as_slice()[0] & 0x10) != 0;
-        let bb = (payload.as_slice()[0] & 0x08) != 0;
-        let ee = (payload.as_slice()[0] & 0x04) != 0;
-        let vv = (payload.as_slice()[0] & 0x02) != 0;
-        let zz = (payload.as_slice()[0] & 0x01) != 0;
-
-        println!("after ssrc: {:?}\ni: {ii}\np: {pp}\nl: {ll}\nf: {ff}\nb: {bb}\ne: {ee}\nv: {vv}\nz: {zz}\nm: {m}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\nlen payload: {}\n\n\n", packet.header.ssrc, ((payload.as_slice()[1] & 0x7F) as u16) << 8 | payload.as_slice()[2] as u16, payload.as_slice()[3], payload.len());
-
-        // if v {
-        //     panic!("aaaaa");
-        // }
-
         writer
             .write_rtp(
                 packet.header.payload_type,
@@ -683,7 +555,7 @@ impl Client {
                 packet.header.marker,
                 packet.header.ext_vals.clone(),
                 false,
-                payload,
+                packet.payload.clone(),
             )
             .unwrap();
     }
@@ -724,9 +596,6 @@ enum Propagated {
     /// A new incoming track opened.
     TrackOpen(ClientId, Weak<TrackIn>),
 
-    /// Data to be propagated from one client to another.
-    MediaData(ClientId, MediaData),
-
     /// A keyframe request from one client to the source.
     KeyframeRequest(ClientId, KeyframeRequest, ClientId, Mid),
 
@@ -738,7 +607,6 @@ impl Propagated {
     fn client_id(&self) -> Option<ClientId> {
         match self {
             Propagated::TrackOpen(c, _)
-            | Propagated::MediaData(c, _)
             | Propagated::KeyframeRequest(c, _, _, _)
             | Propagated::RtpPacket(c, _) => Some(*c),
             _ => None,
