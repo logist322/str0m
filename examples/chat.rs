@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use rouille::Server;
 use rouille::{Request, Response};
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::change::{self, SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::media::{KeyframeRequestKind, MediaKind};
@@ -38,6 +38,11 @@ fn init_log() {
         .init();
 }
 
+enum Change {
+    Spatial(u8),
+    Temporal(u8),
+}
+
 pub fn main() {
     init_log();
 
@@ -50,6 +55,7 @@ pub fn main() {
     let host_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
     let (tx, rx) = mpsc::sync_channel(1);
+    let (tx_change, rx_change) = mpsc::sync_channel(16);
 
     // Spin up a UDP socket for the RTC. All WebRTC traffic is going to be multiplexed over this single
     // server socket. Clients are identified via their respective remote (UDP) socket address.
@@ -58,10 +64,10 @@ pub fn main() {
     info!("Bound UDP port: {}", addr);
 
     // The run loop is on a separate thread to the web server.
-    thread::spawn(move || run(socket, rx));
+    thread::spawn(move || run(socket, rx, rx_change));
 
     let server = Server::new("0.0.0.0:3000", move |request| {
-        web_request(request, addr, tx.clone())
+        web_request(request, addr, tx.clone(), tx_change.clone())
     })
     .expect("starting the web server");
 
@@ -72,9 +78,38 @@ pub fn main() {
 }
 
 // Handle a web request.
-fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Response {
+fn web_request(
+    request: &Request,
+    addr: SocketAddr,
+    tx: SyncSender<Rtc>,
+    tx_change: SyncSender<Change>,
+) -> Response {
     if request.method() == "GET" {
         return Response::html(include_str!("chat.html"));
+    }
+
+    if request.method() == "POST" {
+        let mut ok = false;
+
+        if let Some(spatial) = request.get_param("spatial") {
+            tx_change
+                .send(Change::Spatial(spatial.parse().unwrap()))
+                .expect("to send spatial change");
+
+            ok = true;
+        }
+
+        if let Some(temporal) = request.get_param("temporal") {
+            tx_change
+                .send(Change::Temporal(temporal.parse().unwrap()))
+                .expect("to send temporal change");
+
+            ok = true;
+        }
+
+        if ok {
+            return Response::empty_204();
+        }
     }
 
     // Expected POST SDP Offers.
@@ -108,7 +143,7 @@ fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Resp
 
 /// This is the "main run loop" that handles all clients, reads and writes UdpSocket traffic,
 /// and forwards media data between clients.
-fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
+fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Result<(), RtcError> {
     let mut clients: Vec<Client> = vec![];
     let mut buf = vec![0; 2000];
 
@@ -125,6 +160,19 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
             }
 
             clients.push(client);
+        }
+
+        while let Some(change) = match rx_change.try_recv() {
+            Ok(change) => Some(change),
+            Err(TryRecvError::Empty) => None,
+            _ => panic!("Receiver<Change> disconnected"),
+        } {
+            for client in &mut clients {
+                match change {
+                    Change::Spatial(s) => client.target_spatial = s,
+                    Change::Temporal(t) => client.target_temporal = t,
+                }
+            }
         }
 
         // Poll all clients, and get propagated events as a result.
@@ -240,6 +288,10 @@ struct Client {
     tracks_in: Vec<TrackInEntry>,
     tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
+
+    target_spatial: u8,
+    target_temporal: u8,
+    vp9_header_descriptor: Vp9HeaderDescriptor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +352,10 @@ impl Client {
             tracks_in: vec![],
             tracks_out: vec![],
             chosen_rid: None,
+
+            target_spatial: 2,
+            target_temporal: 2,
+            vp9_header_descriptor: Vp9HeaderDescriptor::default(),
         }
     }
 
@@ -546,13 +602,23 @@ impl Client {
             return;
         };
 
+        self.vp9_header_descriptor.parse(&packet.payload);
+
+        if (self.vp9_header_descriptor.sid > self.target_spatial)
+            || (self.vp9_header_descriptor.tid > self.target_temporal)
+        {
+            return;
+        }
+
         writer
             .write_rtp(
                 packet.header.payload_type,
                 packet.seq_no,
                 packet.time.numer() as u32,
                 packet.timestamp,
-                packet.header.marker,
+                packet.header.marker
+                    || (self.vp9_header_descriptor.e
+                        && self.vp9_header_descriptor.sid == self.target_spatial),
                 packet.header.ext_vals.clone(),
                 false,
                 packet.payload.clone(),
@@ -611,5 +677,351 @@ impl Propagated {
             | Propagated::RtpPacket(c, _) => Some(*c),
             _ => None,
         }
+    }
+}
+
+trait BitRead {
+    fn remaining(&self) -> usize;
+    fn get_u8(&mut self) -> u8;
+    fn get_u16(&mut self) -> u16;
+}
+
+impl BitRead for (&[u8], usize) {
+    #[inline(always)]
+    fn remaining(&self) -> usize {
+        (self.0.len() * 8).saturating_sub(self.1)
+    }
+
+    #[inline(always)]
+    fn get_u8(&mut self) -> u8 {
+        if self.remaining() == 0 {
+            panic!("Too few bits left");
+        }
+
+        let offs = self.1 / 8;
+        let shift = (self.1 % 8) as u32;
+        self.1 += 8;
+
+        let mut n = self.0[offs];
+
+        if shift > 0 {
+            n <<= shift;
+            n |= self.0[offs + 1] >> (8 - shift)
+        }
+
+        n
+    }
+
+    fn get_u16(&mut self) -> u16 {
+        u16::from_be_bytes([self.get_u8(), self.get_u8()])
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Default, Clone)]
+pub struct Vp9HeaderDescriptor {
+    /// picture ID is present
+    pub i: bool,
+    /// inter-picture predicted frame.
+    pub p: bool,
+    /// layer indices present
+    pub l: bool,
+    /// flexible mode
+    pub f: bool,
+    /// start of frame. beginning of new vp9 frame
+    pub b: bool,
+    /// end of frame
+    pub e: bool,
+    /// scalability structure (SS) present
+    pub v: bool,
+    /// Not a reference frame for upper spatial layers
+    pub z: bool,
+
+    /// Recommended headers
+    /// 7 or 16 bits, picture ID.
+    pub picture_id: u16,
+
+    /// Conditionally recommended headers
+    /// Temporal layer ID
+    pub tid: u8,
+    /// Switching up point
+    pub u: bool,
+    /// Spatial layer ID
+    pub sid: u8,
+    /// Inter-layer dependency used
+    pub d: bool,
+
+    /// Conditionally required headers
+    /// Reference index (F=1)
+    pub pdiff: Vec<u8>,
+    /// Temporal layer zero index (F=0)
+    pub tl0picidx: u8,
+
+    /// Scalability structure headers
+    /// N_S + 1 indicates the number of spatial layers present in the VP9 stream
+    pub ns: u8,
+    /// Each spatial layer's frame resolution present
+    pub y: bool,
+    /// PG description present flag.
+    pub g: bool,
+    /// N_G indicates the number of pictures in a Picture Group (PG)
+    pub ng: u8,
+    pub width: [Option<u16>; 3 as usize],
+    pub height: [Option<u16>; 3 as usize],
+    /// Temporal layer ID of pictures in a Picture Group
+    pub pgtid: Vec<u8>,
+    /// Switching up point of pictures in a Picture Group
+    pub pgu: Vec<bool>,
+    /// Reference indices of pictures in a Picture Group
+    pub pgpdiff: Vec<Vec<u8>>,
+
+    pub count: u8,
+}
+
+impl Vp9HeaderDescriptor {
+    /// depacketize parses the passed byte slice and stores the result in the Vp9Packet this method is called upon
+    fn parse(&mut self, packet: &[u8]) {
+        if packet.is_empty() {
+            panic!("1111");
+        }
+
+        let mut reader = (packet, 0);
+        let b = reader.get_u8();
+
+        self.i = (b & 0x80) != 0;
+        self.p = (b & 0x40) != 0;
+        self.l = (b & 0x20) != 0;
+        self.f = (b & 0x10) != 0;
+        self.b = (b & 0x08) != 0;
+        self.e = (b & 0x04) != 0;
+        self.v = (b & 0x02) != 0;
+        self.z = (b & 0x01) != 0;
+
+        let mut payload_index = 1;
+
+        if self.i {
+            payload_index = self.parse_picture_id(&mut reader, payload_index);
+        }
+
+        if self.l {
+            payload_index = self.parse_layer_info(&mut reader, payload_index);
+        }
+
+        if self.f && self.p {
+            payload_index = self.parse_ref_indices(&mut reader, payload_index);
+        }
+
+        if self.v {
+            _ = self.parse_ssdata(&mut reader, payload_index);
+        }
+
+        // println!("i: {}\np: {}\nl: {}\nf: {}\nb: {}\ne: {}\nv: {}\nz: {}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\n\n\n", self.i, self.p, self.l, self.f, self.b, self.e, self.v, self.z, self.picture_id, self.tl0picidx);
+
+        // self.update_extra(extra, out.len(), packet.len(), payload_index)?;
+
+        // out.extend_from_slice(&packet[payload_index..]);
+
+        // println!("\nextra: {extra:?}");
+
+        // if self.count == 10 {
+        //     panic!("1111111111");
+        // }
+        // self.count.add_assign(1);
+    }
+
+    // Picture ID:
+    //
+    //      +-+-+-+-+-+-+-+-+
+    // I:   |M| PICTURE ID  |   M:0 => picture id is 7 bits.
+    //      +-+-+-+-+-+-+-+-+   M:1 => picture id is 15 bits.
+    // M:   | EXTENDED PID  |
+    //      +-+-+-+-+-+-+-+-+
+    //
+    fn parse_picture_id(&mut self, reader: &mut dyn BitRead, mut payload_index: usize) -> usize {
+        if reader.remaining() == 0 {
+            panic!("too short");
+        }
+        let b = reader.get_u8();
+        payload_index += 1;
+        // PID present?
+        if (b & 0x80) != 0 {
+            if reader.remaining() == 0 {
+                panic!("too short");
+            }
+            // M == 1, PID is 15bit
+            self.picture_id = (((b & 0x7f) as u16) << 8) | (reader.get_u8() as u16);
+            payload_index += 1;
+        } else {
+            self.picture_id = (b & 0x7F) as u16;
+        }
+
+        payload_index
+    }
+
+    fn parse_layer_info(&mut self, reader: &mut dyn BitRead, mut payload_index: usize) -> usize {
+        payload_index = self.parse_layer_info_common(reader, payload_index);
+
+        if self.f {
+            payload_index
+        } else {
+            self.parse_layer_info_non_flexible_mode(reader, payload_index)
+        }
+    }
+
+    // Layer indices (flexible mode):
+    //
+    //      +-+-+-+-+-+-+-+-+
+    // L:   |  T  |U|  S  |D|
+    //      +-+-+-+-+-+-+-+-+
+    //
+    fn parse_layer_info_common(
+        &mut self,
+        reader: &mut dyn BitRead,
+        mut payload_index: usize,
+    ) -> usize {
+        if reader.remaining() == 0 {
+            panic!("too short");
+        }
+        let b = reader.get_u8();
+        payload_index += 1;
+
+        self.tid = b >> 5;
+        self.u = b & 0x10 != 0;
+        self.sid = (b >> 1) & 0x7;
+        self.d = b & 0x01 != 0;
+
+        if self.sid >= 3 {
+            panic!("too many spat");
+        } else {
+            payload_index
+        }
+    }
+
+    // Layer indices (non-flexible mode):
+    //
+    //      +-+-+-+-+-+-+-+-+
+    // L:   |  T  |U|  S  |D|
+    //      +-+-+-+-+-+-+-+-+
+    //      |   tl0picidx   |
+    //      +-+-+-+-+-+-+-+-+
+    //
+    fn parse_layer_info_non_flexible_mode(
+        &mut self,
+        reader: &mut dyn BitRead,
+        mut payload_index: usize,
+    ) -> usize {
+        if reader.remaining() == 0 {
+            panic!("too short");
+        }
+        self.tl0picidx = reader.get_u8();
+        payload_index += 1;
+        payload_index
+    }
+
+    // Reference indices:
+    //
+    //      +-+-+-+-+-+-+-+-+                P=1,F=1: At least one reference index
+    // P,F: | P_DIFF      |N|  up to 3 times          has to be specified.
+    //      +-+-+-+-+-+-+-+-+                    N=1: An additional P_DIFF follows
+    //                                                current P_DIFF.
+    //
+    fn parse_ref_indices(&mut self, reader: &mut dyn BitRead, mut payload_index: usize) -> usize {
+        let mut b = 1u8;
+        while (b & 0x01) != 0 {
+            if reader.remaining() == 0 {
+                panic!("too short");
+            }
+            b = reader.get_u8();
+            payload_index += 1;
+
+            self.pdiff.push(b >> 1);
+            if self.pdiff.len() >= 3 {
+                print!("too many diffs");
+            }
+        }
+
+        payload_index
+    }
+
+    // Scalability structure (SS):
+    //
+    //      +-+-+-+-+-+-+-+-+
+    // V:   | N_S |Y|G|-|-|-|
+    //      +-+-+-+-+-+-+-+-+              -|
+    // Y:   |     WIDTH     | (OPTIONAL)    .
+    //      +               +               .
+    //      |               | (OPTIONAL)    .
+    //      +-+-+-+-+-+-+-+-+               . N_S + 1 times
+    //      |     HEIGHT    | (OPTIONAL)    .
+    //      +               +               .
+    //      |               | (OPTIONAL)    .
+    //      +-+-+-+-+-+-+-+-+              -|
+    // G:   |      N_G      | (OPTIONAL)
+    //      +-+-+-+-+-+-+-+-+                           -|
+    // N_G: |  T  |U| R |-|-| (OPTIONAL)                 .
+    //      +-+-+-+-+-+-+-+-+              -|            . N_G times
+    //      |    P_DIFF     | (OPTIONAL)    . R times    .
+    //      +-+-+-+-+-+-+-+-+              -|           -|
+    //
+    fn parse_ssdata(&mut self, reader: &mut dyn BitRead, mut payload_index: usize) -> usize {
+        if reader.remaining() == 0 {
+            panic!("too short");
+        }
+
+        let b = reader.get_u8();
+        payload_index += 1;
+
+        self.ns = b >> 5;
+        self.y = b & 0x10 != 0;
+        self.g = (b >> 1) & 0x7 != 0;
+
+        let ns = (self.ns + 1) as usize;
+        self.ng = 0;
+
+        if self.y {
+            if reader.remaining() < 4 * ns {
+                panic!("too short");
+            }
+
+            for i in 0..ns {
+                self.width[i] = Some(reader.get_u16());
+                self.height[i] = Some(reader.get_u16());
+            }
+            payload_index += 4 * ns;
+        }
+
+        if self.g {
+            if reader.remaining() == 0 {
+                panic!("too short");
+            }
+
+            self.ng = reader.get_u8();
+            payload_index += 1;
+        }
+
+        for i in 0..self.ng as usize {
+            if reader.remaining() == 0 {
+                panic!("too short");
+            }
+            let b = reader.get_u8();
+            payload_index += 1;
+
+            self.pgtid.push(b >> 5);
+            self.pgu.push(b & 0x10 != 0);
+
+            let r = ((b >> 2) & 0x3) as usize;
+            if reader.remaining() < r {
+                panic!("too short");
+            }
+
+            self.pgpdiff.push(vec![]);
+            for _ in 0..r {
+                let b = reader.get_u8();
+                payload_index += 1;
+
+                self.pgpdiff[i].push(b);
+            }
+        }
+
+        payload_index
     }
 }

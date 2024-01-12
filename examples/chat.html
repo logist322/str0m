@@ -16,6 +16,12 @@
     <button id="cam" onClick="startCam()" disabled>Cam</button>
     <button id="mic" onClick="startMic()" disabled>Mic</button>
     ICE: <span id="ice_status">new</span>
+    <button id="s0" onClick="change_spatial(0)">S0</button>
+    <button id="s1" onClick="change_spatial(1)">S1</button>
+    <button id="s2" onClick="change_spatial(2)">S2</button>
+    <button id="t0" onClick="change_temporal(0)">T0</button>
+    <button id="t1" onClick="change_temporal(1)">T1</button>
+    <button id="t2" onClick="change_temporal(2)">T2</button>
     <div id="chan_status">Waiting for data channel.</div>
     <div id="media"></div>
     <script>
@@ -171,6 +177,27 @@
             const answer = await res.json();
             rtc.setRemoteDescription(answer);
             console.log('POST answer', answer.sdp.split('\r\n'));
+        }
+
+        async function change_spatial(s) {
+            const res = await fetch(`/change?spatial=${s}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+            });
+
+            console.dir(res);
+        }
+        async function change_temporal(t) {
+            const res = await fetch(`/change?temporal=${t}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+            });
+
+            console.dir(res);
         }
     </script>
 </body>
