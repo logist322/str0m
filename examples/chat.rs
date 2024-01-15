@@ -38,6 +38,7 @@ fn init_log() {
         .init();
 }
 
+#[derive(Debug)]
 enum Change {
     Spatial(u8),
     Temporal(u8),
@@ -162,6 +163,8 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Res
             clients.push(client);
         }
 
+        let mut to_propagate = Vec::new();
+
         while let Some(change) = match rx_change.try_recv() {
             Ok(change) => Some(change),
             Err(TryRecvError::Empty) => None,
@@ -169,11 +172,41 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Res
         } {
             for client in &mut clients {
                 match change {
-                    Change::Spatial(s) => client.target_spatial = s,
+                    Change::Spatial(s) => {
+                        if s > client.target_spatial {
+                            let Some(mid) = client
+                                .tracks_out
+                                .iter()
+                                .find(|o| {
+                                    o.track_in
+                                        .upgrade()
+                                        .filter(|i| i.kind == MediaKind::Video)
+                                        .is_some()
+                                })
+                                .and_then(|o| o.mid())
+                            else {
+                                continue;
+                            };
+
+                            to_propagate.push(client.handle_incoming_keyframe_req(
+                                KeyframeRequest {
+                                    mid,
+                                    rid: None,
+                                    kind: KeyframeRequestKind::Fir,
+                                },
+                            ));
+
+                            client.new_spatial = Some(s);
+                        } else {
+                            client.target_spatial = s;
+                        }
+                    }
                     Change::Temporal(t) => client.target_temporal = t,
                 }
             }
         }
+
+        propagate(&mut clients, to_propagate);
 
         // Poll all clients, and get propagated events as a result.
         let to_propagate: Vec<_> = clients
@@ -289,8 +322,11 @@ struct Client {
     tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 
+    new_spatial: Option<u8>,
+
     target_spatial: u8,
     target_temporal: u8,
+
     vp9_header_descriptor: Vp9HeaderDescriptor,
 }
 
@@ -353,6 +389,7 @@ impl Client {
             tracks_out: vec![],
             chosen_rid: None,
 
+            new_spatial: None,
             target_spatial: 2,
             target_temporal: 2,
             vp9_header_descriptor: Vp9HeaderDescriptor::default(),
@@ -604,11 +641,30 @@ impl Client {
 
         self.vp9_header_descriptor.parse(&packet.payload);
 
+        if !self.vp9_header_descriptor.p
+            && self.vp9_header_descriptor.sid == 0
+            && self.vp9_header_descriptor.b
+        {
+            println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1");
+
+            if let Some(new_s) = self.new_spatial.take() {
+                println!("new spatial");
+                self.target_spatial = new_s;
+            }
+        }
+
         if (self.vp9_header_descriptor.sid > self.target_spatial)
             || (self.vp9_header_descriptor.tid > self.target_temporal)
         {
             return;
         }
+
+        // println!(
+        //     "pid: {:?}, sid: {:?}, tid: {:?}",
+        //     self.vp9_header_descriptor.picture_id,
+        //     self.vp9_header_descriptor.sid,
+        //     self.vp9_header_descriptor.tid
+        // );
 
         writer
             .write_rtp(
@@ -627,6 +683,8 @@ impl Client {
     }
 
     fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
+        println!("keyframe request {req:?}");
+
         let has_incoming_track = self.tracks_in.iter().any(|i| i.id.mid == mid_in);
 
         // This will be the case for all other client but the one where the track originates.
