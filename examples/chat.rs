@@ -196,9 +196,9 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Res
                                 },
                             ));
 
-                            client.new_spatial = Some(s);
+                            client.pending_spatial = Some(s);
                         } else {
-                            client.target_spatial = s;
+                            client.new_spatial = Some(s);
                         }
                     }
                     Change::Temporal(t) => client.target_temporal = t,
@@ -323,6 +323,7 @@ struct Client {
     chosen_rid: Option<Rid>,
 
     new_spatial: Option<u8>,
+    pending_spatial: Option<u8>,
 
     target_spatial: u8,
     target_temporal: u8,
@@ -390,6 +391,8 @@ impl Client {
             chosen_rid: None,
 
             new_spatial: None,
+            pending_spatial: None,
+
             target_spatial: 2,
             target_temporal: 2,
             vp9_header_descriptor: Vp9HeaderDescriptor::default(),
@@ -645,10 +648,13 @@ impl Client {
             && self.vp9_header_descriptor.sid == 0
             && self.vp9_header_descriptor.b
         {
-            println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1");
+            if let Some(new_s) = self.pending_spatial.take() {
+                self.target_spatial = new_s;
+            }
+        }
 
+        if self.vp9_header_descriptor.sid == 0 && self.vp9_header_descriptor.b {
             if let Some(new_s) = self.new_spatial.take() {
-                println!("new spatial");
                 self.target_spatial = new_s;
             }
         }
