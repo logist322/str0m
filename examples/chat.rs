@@ -38,21 +38,9 @@ fn init_log() {
         .init();
 }
 
-#[derive(Debug)]
-enum Change {
-    Spatial(u8),
-    Temporal(u8),
-}
-
 pub fn main() {
     init_log();
 
-    let certificate = include_bytes!("cer.pem").to_vec();
-    let private_key = include_bytes!("key.pem").to_vec();
-
-    // Figure out some public IP address, since Firefox will not accept 127.0.0.1 for WebRTC traffic.
-    // let host_addr = util::select_host_address();
-    // let host_addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 81));
     let host_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
     let (tx, rx) = mpsc::sync_channel(1);
@@ -70,7 +58,7 @@ pub fn main() {
     let server = Server::new("0.0.0.0:3000", move |request| {
         web_request(request, addr, tx.clone(), tx_change.clone())
     })
-    .expect("starting the web server");
+        .expect("starting the web server");
 
     let port = server.server_addr().port();
     info!("Connect a browser to https://{:?}:{:?}", addr.ip(), port);
@@ -78,23 +66,27 @@ pub fn main() {
     server.run();
 }
 
+#[derive(Debug)]
+enum LayerChangeRequest {
+    Spatial(u8),
+    Temporal(u8),
+}
+
 // Handle a web request.
 fn web_request(
     request: &Request,
     addr: SocketAddr,
     tx: SyncSender<Rtc>,
-    tx_change: SyncSender<Change>,
+    tx_change: SyncSender<LayerChangeRequest>,
 ) -> Response {
     if request.method() == "GET" {
         return Response::html(include_str!("chat.html"));
-    }
-
-    if request.method() == "POST" {
+    } else if request.method() == "POST" {
         let mut ok = false;
 
         if let Some(spatial) = request.get_param("spatial") {
             tx_change
-                .send(Change::Spatial(spatial.parse().unwrap()))
+                .send(LayerChangeRequest::Spatial(spatial.parse().unwrap()))
                 .expect("to send spatial change");
 
             ok = true;
@@ -102,7 +94,7 @@ fn web_request(
 
         if let Some(temporal) = request.get_param("temporal") {
             tx_change
-                .send(Change::Temporal(temporal.parse().unwrap()))
+                .send(LayerChangeRequest::Temporal(temporal.parse().unwrap()))
                 .expect("to send temporal change");
 
             ok = true;
@@ -144,7 +136,7 @@ fn web_request(
 
 /// This is the "main run loop" that handles all clients, reads and writes UdpSocket traffic,
 /// and forwards media data between clients.
-fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Result<(), RtcError> {
+fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<LayerChangeRequest>) -> Result<(), RtcError> {
     let mut clients: Vec<Client> = vec![];
     let mut buf = vec![0; 2000];
 
@@ -172,7 +164,7 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Res
         } {
             for client in &mut clients {
                 match change {
-                    Change::Spatial(s) => {
+                    LayerChangeRequest::Spatial(s) => {
                         if s > client.target_spatial {
                             let Some(mid) = client
                                 .tracks_out
@@ -201,7 +193,7 @@ fn run(socket: UdpSocket, rx: Receiver<Rtc>, rx_change: Receiver<Change>) -> Res
                             client.new_spatial = Some(s);
                         }
                     }
-                    Change::Temporal(t) => client.target_temporal = t,
+                    LayerChangeRequest::Temporal(t) => client.target_temporal = t,
                 }
             }
         }
@@ -267,13 +259,13 @@ fn propagate(clients: &mut [Client], to_propagate: Vec<Propagated>) {
 
             match &propagated {
                 Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
+                Propagated::RtpPacket(_, packet) => client.handle_packet(client_id, packet),
                 Propagated::KeyframeRequest(_, req, origin, mid_in) => {
                     // Only one origin client handles the keyframe request.
                     if *origin == client.id {
                         client.handle_keyframe_request(*req, *mid_in)
                     }
                 }
-                Propagated::RtpPacket(_, packet) => client.handle_packet(client_id, packet),
                 Propagated::Noop | Propagated::Timeout(_) => {}
             }
         }
@@ -322,13 +314,15 @@ struct Client {
     tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 
+    // set on downscaling
     new_spatial: Option<u8>,
+    // set on upscaling
     pending_spatial: Option<u8>,
 
+    // currently set
     target_spatial: u8,
     target_temporal: u8,
 
-    last_seq: u16,
     base_seq: u16,
     base_seq_prev: u16,
 
@@ -402,7 +396,6 @@ impl Client {
 
             base_seq: 0,
             base_seq_prev: 0,
-            last_seq: 0,
 
             vp9_header_descriptor: Vp9HeaderDescriptor::default(),
         }
@@ -672,21 +665,14 @@ impl Client {
             || (self.vp9_header_descriptor.tid > self.target_temporal)
         {
             self.base_seq += 1;
-            
+
             return;
         }
 
-
         let header_seq = packet.header.sequence_number - self.base_seq + self.base_seq_prev + 1;
-
-        // println!(
-        //     "pid: {:?}, sid: {:?}, tid: {:?}",
-        //     self.vp9_header_descriptor.picture_id,
-        //     self.vp9_header_descriptor.sid,
-        //     self.vp9_header_descriptor.tid
-        // );
-
-        println!("seq_no {header_seq:?}");
+        let marker = packet.header.marker
+            || (self.vp9_header_descriptor.e
+            && self.vp9_header_descriptor.sid == self.target_spatial);
 
         writer
             .write_rtp(
@@ -694,19 +680,15 @@ impl Client {
                 (header_seq as u64).into(),
                 packet.time.numer() as u32,
                 packet.timestamp,
-                packet.header.marker
-                    || (self.vp9_header_descriptor.e
-                        && self.vp9_header_descriptor.sid == self.target_spatial),
+                marker,
                 packet.header.ext_vals.clone(),
-                false,
+                true,
                 packet.payload.clone(),
             )
             .unwrap();
     }
 
     fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
-        // println!("keyframe request {req:?}");
-
         let has_incoming_track = self.tracks_in.iter().any(|i| i.id.mid == mid_in);
 
         // This will be the case for all other client but the one where the track originates.
@@ -717,15 +699,6 @@ impl Client {
         let mut dir = self.rtc.direct_api();
         let stream = dir.stream_rx_by_mid(mid_in, None).unwrap();
         stream.request_keyframe(req.kind);
-
-        // let Some(mut writer) = self.rtc.writer(mid_in) else {
-        //     return;
-        // };
-        //
-        // if let Err(e) = writer.request_keyframe(req.rid, req.kind) {
-        //     // This can fail if the rid doesn't match any media.
-        //     info!("request_keyframe failed: {:?}", e);
-        // }
     }
 }
 
@@ -753,8 +726,8 @@ impl Propagated {
     fn client_id(&self) -> Option<ClientId> {
         match self {
             Propagated::TrackOpen(c, _)
-            | Propagated::KeyframeRequest(c, _, _, _)
-            | Propagated::RtpPacket(c, _) => Some(*c),
+            | Propagated::RtpPacket(c, _),
+            | Propagated::KeyframeRequest(c, _, _, _) => Some(*c),
             _ => None,
         }
     }
@@ -860,9 +833,7 @@ pub struct Vp9HeaderDescriptor {
 impl Vp9HeaderDescriptor {
     /// depacketize parses the passed byte slice and stores the result in the Vp9Packet this method is called upon
     fn parse(&mut self, packet: &[u8]) {
-        if packet.is_empty() {
-            panic!("1111");
-        }
+        assert!(packet.len() > 0);
 
         let mut reader = (packet, 0);
         let b = reader.get_u8();
@@ -893,19 +864,6 @@ impl Vp9HeaderDescriptor {
         if self.v {
             _ = self.parse_ssdata(&mut reader, payload_index);
         }
-
-        // println!("i: {}\np: {}\nl: {}\nf: {}\nb: {}\ne: {}\nv: {}\nz: {}\nPICTURE ID: {:?}\nTL0PICIDX: {:?}\n\n\n", self.i, self.p, self.l, self.f, self.b, self.e, self.v, self.z, self.picture_id, self.tl0picidx);
-
-        // self.update_extra(extra, out.len(), packet.len(), payload_index)?;
-
-        // out.extend_from_slice(&packet[payload_index..]);
-
-        // println!("\nextra: {extra:?}");
-
-        // if self.count == 10 {
-        //     panic!("1111111111");
-        // }
-        // self.count.add_assign(1);
     }
 
     // Picture ID:
