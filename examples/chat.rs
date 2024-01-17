@@ -3,14 +3,14 @@ extern crate tracing;
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::ops::Deref;
+use std::ops::{Deref, AddAssign};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Weak};
 use std::thread::{self, panicking};
 use std::time::{Duration, Instant};
 
-use rouille::Server;
+use rouille::{Server, HeadersIter};
 use rouille::{Request, Response};
 use str0m::change::{self, SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
@@ -328,6 +328,10 @@ struct Client {
     target_spatial: u8,
     target_temporal: u8,
 
+    last_seq: u16,
+    base_seq: u16,
+    base_seq_prev: u16,
+
     vp9_header_descriptor: Vp9HeaderDescriptor,
 }
 
@@ -395,6 +399,11 @@ impl Client {
 
             target_spatial: 2,
             target_temporal: 2,
+
+            base_seq: 0,
+            base_seq_prev: 0,
+            last_seq: 0,
+
             vp9_header_descriptor: Vp9HeaderDescriptor::default(),
         }
     }
@@ -662,8 +671,13 @@ impl Client {
         if (self.vp9_header_descriptor.sid > self.target_spatial)
             || (self.vp9_header_descriptor.tid > self.target_temporal)
         {
+            self.base_seq += 1;
+            
             return;
         }
+
+
+        let header_seq = packet.header.sequence_number - self.base_seq + self.base_seq_prev + 1;
 
         // println!(
         //     "pid: {:?}, sid: {:?}, tid: {:?}",
@@ -672,10 +686,12 @@ impl Client {
         //     self.vp9_header_descriptor.tid
         // );
 
+        println!("seq_no {header_seq:?}");
+
         writer
             .write_rtp(
                 packet.header.payload_type,
-                packet.seq_no,
+                (header_seq as u64).into(),
                 packet.time.numer() as u32,
                 packet.timestamp,
                 packet.header.marker
@@ -689,7 +705,7 @@ impl Client {
     }
 
     fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
-        println!("keyframe request {req:?}");
+        // println!("keyframe request {req:?}");
 
         let has_incoming_track = self.tracks_in.iter().any(|i| i.id.mid == mid_in);
 
