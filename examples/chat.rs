@@ -726,7 +726,7 @@ impl Propagated {
     fn client_id(&self) -> Option<ClientId> {
         match self {
             Propagated::TrackOpen(c, _)
-            | Propagated::RtpPacket(c, _),
+            | Propagated::RtpPacket(c, _)
             | Propagated::KeyframeRequest(c, _, _, _) => Some(*c),
             _ => None,
         }
@@ -1061,5 +1061,48 @@ impl Vp9HeaderDescriptor {
         }
 
         payload_index
+    }
+}
+
+
+#[test]
+fn asd(){
+    let mut asd = Asd {
+        base_seq: 0,
+    };
+
+    assert_eq!(asd.test(0, true), Some(1));
+    assert_eq!(asd.test(1, true), Some(2));
+    assert_eq!(asd.test(2, false), None);
+    assert_eq!(asd.test(3, false), None);
+    assert_eq!(asd.test(4, false), None);
+    assert_eq!(asd.test(5, true), Some(3));
+    assert_eq!(asd.test(7, true), Some(5));
+    assert_eq!(asd.test(6, true), Some(4));
+
+    assert_eq!(asd.test(9, true), Some(7));
+    assert_eq!(asd.test(10, true), Some(8));
+
+    assert_eq!(asd.test(11, false), None);
+    assert_eq!(asd.test(12, false), None);
+    assert_eq!(asd.test(13, false), None);
+    assert_eq!(asd.test(14, false), None);
+
+    assert_eq!(asd.test(8, true), Some(6));
+}
+
+struct Asd {
+    base_seq: u64
+}
+
+impl Asd {
+    fn test(&mut self, orig: u64, relay: bool) -> Option<u64> {
+        if !relay {
+            self.base_seq += 1;
+
+            return None;
+        }
+
+        Some(orig - self.base_seq + 1)
     }
 }
